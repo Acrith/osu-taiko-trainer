@@ -1,0 +1,28 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.uv-cache/
+*.egg-info/
+build/
+dist/
+
+# ---- Trainer data (personal, not shared) ----
+# The SQLite DB is per-user, contains replays + snapshots.
+# Never commit it.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# References/replays are large + personal.
+# Uncomment the next line if you want to share the reference tree in your fork.
+references/
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/

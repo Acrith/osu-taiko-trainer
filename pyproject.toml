@@ -1,0 +1,22 @@
+[project]
+name = "taiko-trainer"
+version = "0.1.0"
+description = "Local osu!taiko training assistant: parse maps and replays, extract skill dimensions"
+authors = [
+    { name = "Acrith", email = "rafcioext@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "osrparse>=6.0.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "python-multipart>=0.0.20",
+]
+
+[project.scripts]
+taiko-trainer = "taiko_trainer:main"
+taiko-smoke = "taiko_trainer.smoke:main"
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
