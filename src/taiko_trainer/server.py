@@ -356,11 +356,17 @@ h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 .chart-lane .n.big { width: 14px; height: 14px; box-shadow: 0 0 0 1px rgba(255,255,255,0.35) inset; }
 .chart-lane .n.don { background: var(--accent); }
 .chart-lane .n.kat { background: var(--accent-cool); }
-.input-lane .n { width: 7px; height: 7px; }
+.input-lane .n { width: 7px; height: 7px; top: 50%; }
 .input-lane .n.don { background: var(--accent); }
 .input-lane .n.kat { background: var(--accent-cool); }
-.input-lane .n.hL { top: 25%; }
-.input-lane .n.hR { top: 75%; }
+.inspector-frame.split-hands .hand-divider { display: block; }
+.inspector-frame.split-hands .input-lane .n.hL { top: 25%; }
+.inspector-frame.split-hands .input-lane .n.hR { top: 75%; }
+.hand-divider { display: none; }
+.inspector-toggle { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; cursor: pointer; }
+.inspector-toggle input { margin: 0; cursor: pointer; }
+.inspector-frame { cursor: grab; }
+.inspector-frame.panning { cursor: grabbing; }
 .axis { position: absolute; left: 60px; right: 12px; bottom: 0; height: 30px; border-top: 1px solid var(--rule); }
 .axis .tick { position: absolute; top: 4px; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); transform: translateX(-50%); white-space: nowrap; }
 .axis .tick::before { content: ''; position: absolute; top: -6px; left: 50%; width: 1px; height: 6px; background: var(--rule); transform: translateX(-50%); }
@@ -699,9 +705,9 @@ def _render_inspector(row: dict, player: str, judged, replay) -> str:
         <span><span class="lg kat"></span>kat</span>
         <span><span class="lg band-legend miss"></span>miss</span>
         <span><span class="lg band-legend ok"></span>ok</span>
-        <span class="hint" style="margin-left: 16px;">input lane: top row = left hand · bottom row = right hand</span>
       </div>
       <div style="flex:1"></div>
+      <label class="inspector-toggle"><input type="checkbox" id="split-hands"> <span class="hint">split hands</span></label>
       <button id="reset-zoom" class="inspector-btn">reset zoom</button>
     </div>
 
@@ -846,6 +852,44 @@ def _render_inspector(row: dict, player: str, judged, replay) -> str:
         tStart = Math.max(0, Math.min(duration - width, duration * pct - width / 2));
         tEnd = tStart + width;
         refresh();
+      }});
+
+      // drag-to-pan on the main frame — click and drag horizontally to scroll the window
+      let panState = null;
+      frame.addEventListener('mousedown', ev => {{
+        if (ev.button !== 0) return;
+        panState = {{
+          startX: ev.clientX,
+          startTStart: tStart,
+          startTEnd: tEnd,
+          width: tEnd - tStart,
+          frameWidth: frame.getBoundingClientRect().width,
+          moved: false,
+        }};
+        frame.classList.add('panning');
+      }});
+      document.addEventListener('mousemove', ev => {{
+        if (!panState) return;
+        const dx = ev.clientX - panState.startX;
+        if (Math.abs(dx) > 2) panState.moved = true;
+        const dt = -(dx / panState.frameWidth) * panState.width;
+        let newStart = panState.startTStart + dt;
+        newStart = Math.max(0, Math.min(duration - panState.width, newStart));
+        tStart = newStart;
+        tEnd = newStart + panState.width;
+        refresh();
+      }});
+      document.addEventListener('mouseup', () => {{
+        if (panState) {{
+          panState = null;
+          frame.classList.remove('panning');
+        }}
+      }});
+
+      // hand-split toggle
+      const splitToggle = document.getElementById('split-hands');
+      splitToggle.addEventListener('change', () => {{
+        frame.classList.toggle('split-hands', splitToggle.checked);
       }});
 
       // wheel zoom over the main frame (mouse position = zoom center)
