@@ -38,6 +38,8 @@ from .db import (
     workspace_status,
 )
 from .features import extract_features
+from .judgment import Verdict, judge_replay
+from .osr_parser import parse_osr_file
 from .player import PlayerSkill
 from .report import build_report
 from .sessions import group_sessions
@@ -98,6 +100,36 @@ def create_app(workspace: str) -> FastAPI:
         )
         conn.close()
         return _render_train_page(name, dim, report.skill, suggestions, report.dim_contributors.get(dim, ()))
+
+    @app.get("/replay/{player}/{replay_id}/inspect", response_class=HTMLResponse)
+    def replay_inspect(player: str, replay_id: int):
+        conn = open_plays(workspace, player)
+        row = conn.execute(
+            """
+            SELECT r.*, m.md5 AS map_md5_ref, m.title AS map_title, m.version AS map_version
+            FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
+            WHERE r.id = ?
+            """,
+            (replay_id,),
+        ).fetchone()
+        if not row:
+            conn.close()
+            return HTMLResponse(_render_error(f"Replay {replay_id} for {player} not found."), status_code=404)
+        map_bytes = get_map_content(conn, row["map_md5_ref"])
+        conn.close()
+        if not map_bytes:
+            return HTMLResponse(_render_error("Map content missing from catalog."), status_code=500)
+        # Re-parse map, re-parse replay from blob, re-judge.
+        bm = _parse_bytes_as_osu(map_bytes)
+        with tempfile.NamedTemporaryFile(suffix=".osr", delete=False) as tmp:
+            tmp.write(bytes(row["content"]))
+            tmp_path = tmp.name
+        try:
+            rp = parse_osr_file(tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+        judged = judge_replay(bm, rp)
+        return _render_inspector(dict(row), player, judged)
 
     @app.get("/replay/{player}/{replay_id}", response_class=HTMLResponse)
     def replay_page(player: str, replay_id: int):
@@ -293,6 +325,45 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .fc-badge.fc { background: var(--great); color: white; }
 .fc-badge.ss { background: linear-gradient(90deg, #d4af37, #f1d475); color: #3a2a00; }
 h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
+
+/* --- inspector --- */
+.inspector-toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+.inspector-toolbar label { display: flex; align-items: center; gap: 8px; }
+.inspector-toolbar input[type=range] { width: 200px; }
+.inspector-legend { display: flex; gap: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.inspector-legend > span { display: inline-flex; align-items: center; gap: 4px; }
+.inspector-legend .lg { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.inspector-legend .lg.don { background: var(--accent); }
+.inspector-legend .lg.kat { background: var(--accent-cool); }
+.inspector-legend .lg.great { background: var(--great); }
+.inspector-legend .lg.ok { background: var(--ok); }
+.inspector-legend .lg.miss { background: var(--miss); }
+.jump-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 0 14px; border-bottom: 1px dashed var(--rule); margin-bottom: 12px; }
+.jump-chip { font-family: var(--font-mono); font-size: 11px; background: var(--accent-faint); color: var(--accent); border: 1px solid var(--accent-soft); border-radius: 3px; padding: 3px 8px; cursor: pointer; }
+.jump-chip:hover { background: var(--accent); color: white; }
+.inspector-wrap { overflow-x: auto; overflow-y: hidden; background: var(--ground); border: 1px solid var(--rule); border-radius: 3px; }
+.inspector-track { position: relative; height: 200px; min-width: 100%; }
+.lane { position: absolute; left: 0; right: 0; height: 60px; }
+.chart-lane { top: 20px; border-bottom: 1px solid var(--rule); }
+.input-lane { top: 100px; border-bottom: 1px solid var(--rule); }
+.lane-label { position: absolute; left: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); z-index: 2; background: var(--ground); padding: 0 4px; }
+.chart-label { top: 4px; }
+.input-label { top: 84px; }
+.lane .n { position: absolute; top: 50%; border-radius: 50%; transform: translate(-50%, -50%); }
+.chart-lane .n.sm { width: 8px; height: 8px; }
+.chart-lane .n.big { width: 14px; height: 14px; border: 1px solid rgba(255,255,255,0.4); }
+.chart-lane .n.don { background: var(--accent); }
+.chart-lane .n.kat { background: var(--accent-cool); }
+.input-lane .n { width: 7px; height: 7px; }
+.input-lane .n.great { background: var(--great); }
+.input-lane .n.ok { background: var(--ok); }
+.input-lane .n.miss { width: 10px; height: 10px; background: var(--miss); border: 2px solid var(--miss); }
+.input-lane .n.miss::before, .input-lane .n.miss::after { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 2px; background: white; }
+.input-lane .n.miss::before { transform: rotate(45deg); }
+.input-lane .n.miss::after { transform: rotate(-45deg); }
+.axis { position: absolute; top: 165px; left: 0; right: 0; height: 30px; border-top: 1px solid var(--rule); }
+.axis .tick { position: absolute; top: 4px; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); transform: translateX(-50%); }
+.axis .tick::before { content: ''; position: absolute; top: -6px; left: 50%; width: 1px; height: 6px; background: var(--rule); transform: translateX(-50%); }
 """
 
 
@@ -537,6 +608,150 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
     return _html_page(f"{report.player} report", body)
 
 
+def _render_inspector(row: dict, player: str, judged) -> str:
+    """Two-lane timeline: notes above, player inputs below, misses flagged."""
+    from .judgment import Verdict as _V
+
+    judgments = judged.judgments
+    if not judgments:
+        return _render_error("Replay has no judgments.")
+
+    start_ms = min(j.note.time_ms for j in judgments)
+    end_ms = max(j.note.time_ms for j in judgments)
+    if judged.judgments and any(j.hit_time_ms is not None for j in judgments):
+        end_ms = max(end_ms, max((j.hit_time_ms or 0) for j in judgments))
+    duration_s = max(1.0, (end_ms - start_ms) / 1000)
+
+    # Emit each note as a lightweight <span> with time offset from start (in seconds).
+    # JS positions it later — server just carries the data.
+    note_spans = []
+    input_spans = []
+    misses: list[tuple[float, str]] = []
+    for j in judgments:
+        t_note = (j.note.time_ms - start_ms) / 1000
+        color = "don" if j.note.note_type.is_don else "kat"
+        size = "big" if j.note.note_type.is_big else "sm"
+        note_spans.append(
+            f'<span class="n {color} {size}" data-t="{t_note:.3f}"></span>'
+        )
+        if j.verdict is _V.MISS:
+            input_spans.append(
+                f'<span class="n miss" data-t="{t_note:.3f}" title="MISS @ {t_note:.2f}s"></span>'
+            )
+            misses.append((t_note, f"{j.note.note_type.is_don and 'D' or 'K'}"))
+        else:
+            t_hit = ((j.hit_time_ms or j.note.time_ms) - start_ms) / 1000
+            v_class = "great" if j.verdict is _V.GREAT else "ok"
+            delta = j.hit_delta_ms or 0
+            input_spans.append(
+                f'<span class="n {v_class}" data-t="{t_hit:.3f}" title="{j.verdict.value.upper()} Δ{delta:+d}ms"></span>'
+            )
+
+    # Miss jump list — clickable list of every miss's time.
+    miss_jumps_html = ""
+    if misses:
+        chips = "".join(
+            f'<button class="jump-chip" data-t="{t:.2f}">{int(t)//60}:{int(t)%60:02d}.{int((t%1)*100):02d}</button>'
+            for t, _ in misses[:40]
+        )
+        miss_jumps_html = f'<div class="jump-list"><span class="hint">jump to miss:</span>{chips}</div>'
+
+    total_notes = len(judgments)
+    body = f"""
+  <section>
+    <span class="eyebrow"><a href="/replay/{player}/{row['id']}" style="color: var(--ink-muted);">← replay #{row['id']}</a>  ·  inspector</span>
+    <h1>{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
+    <p class="hint">
+      {total_notes} notes  ·  {len(misses)} misses  ·  {int(duration_s)//60}:{int(duration_s)%60:02d} duration  ·
+      windows: great ±{judged.windows.great:.0f}ms / ok ±{judged.windows.ok:.0f}ms
+    </p>
+  </section>
+
+  <section class="card">
+    <div class="inspector-toolbar">
+      <label class="hint">zoom
+        <input id="zoom-slider" type="range" min="40" max="600" value="150" step="10">
+        <span id="zoom-val" class="hint" style="font-family: var(--font-mono);">150 px/s</span>
+      </label>
+      <div style="flex:1"></div>
+      <div class="inspector-legend">
+        <span><span class="lg don"></span>don</span>
+        <span><span class="lg kat"></span>kat</span>
+        <span><span class="lg great"></span>great</span>
+        <span><span class="lg ok"></span>ok</span>
+        <span><span class="lg miss"></span>miss</span>
+      </div>
+    </div>
+
+    {miss_jumps_html}
+
+    <div class="inspector-wrap" id="inspector-wrap">
+      <div class="inspector-track" id="inspector-track">
+        <div class="lane-label chart-label">chart</div>
+        <div class="lane-label input-label">input</div>
+        <div class="lane chart-lane" id="chart-lane">{"".join(note_spans)}</div>
+        <div class="lane input-lane" id="input-lane">{"".join(input_spans)}</div>
+        <div class="axis" id="axis"></div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    (function() {{
+      const duration = {duration_s:.3f};
+      const wrap = document.getElementById('inspector-wrap');
+      const track = document.getElementById('inspector-track');
+      const chartLane = document.getElementById('chart-lane');
+      const inputLane = document.getElementById('input-lane');
+      const axis = document.getElementById('axis');
+      const slider = document.getElementById('zoom-slider');
+      const zoomVal = document.getElementById('zoom-val');
+      const noteEls = [...chartLane.children, ...inputLane.children];
+
+      function renderAxis(pxPerSec) {{
+        axis.innerHTML = '';
+        // Choose tick interval based on zoom: aim for a tick every ~80px.
+        let step = 1;
+        while (step * pxPerSec < 80) step *= 2;
+        for (let t = 0; t <= duration; t += step) {{
+          const tick = document.createElement('div');
+          tick.className = 'tick';
+          tick.style.left = (t * pxPerSec) + 'px';
+          const min = Math.floor(t / 60);
+          const sec = Math.floor(t % 60);
+          tick.textContent = min + ':' + String(sec).padStart(2, '0');
+          axis.appendChild(tick);
+        }}
+      }}
+
+      function apply(pxPerSec) {{
+        const totalPx = duration * pxPerSec + 80;
+        track.style.width = totalPx + 'px';
+        for (const el of noteEls) {{
+          const t = parseFloat(el.dataset.t);
+          el.style.left = (t * pxPerSec) + 'px';
+        }}
+        renderAxis(pxPerSec);
+        zoomVal.textContent = pxPerSec + ' px/s';
+      }}
+
+      slider.addEventListener('input', () => apply(parseInt(slider.value, 10)));
+      apply(parseInt(slider.value, 10));
+
+      // Miss-jump chips scroll to the miss position.
+      for (const chip of document.querySelectorAll('.jump-chip')) {{
+        chip.addEventListener('click', () => {{
+          const t = parseFloat(chip.dataset.t);
+          const pxPerSec = parseInt(slider.value, 10);
+          wrap.scrollTo({{ left: t * pxPerSec - wrap.clientWidth / 2, behavior: 'smooth' }});
+        }});
+      }}
+    }})();
+  </script>
+"""
+    return _html_page(f"inspect #{row['id']}", body)
+
+
 _DIM_TAGLINE = {
     "speed":       "motor tempo — how fast your hands alternate",
     "stamina":     "endurance — long high-density stretches without dropping",
@@ -683,7 +898,7 @@ def _render_replay(row: dict, player: str, features=None) -> str:
   <section>
     <span class="eyebrow"><a href="/player/{player}" style="color: var(--ink-muted);">← {player}</a>  ·  replay #{row['id']}</span>
     <h1>{header_badge}{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
-    <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}</p>
+    <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}  ·  <a href="/replay/{player}/{row['id']}/inspect">open inspector →</a></p>
   </section>
 
   <section class="stats-row">
