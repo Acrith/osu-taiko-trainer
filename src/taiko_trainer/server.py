@@ -338,7 +338,8 @@ h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 .inspector-legend .lg.ok { background: var(--ok); opacity: 0.35; }
 .inspector-btn { font-family: var(--font-mono); font-size: 11px; background: var(--panel); color: var(--ink-muted); border: 1px solid var(--rule); border-radius: 3px; padding: 4px 12px; cursor: pointer; }
 .inspector-btn:hover { color: var(--ink); border-color: var(--rule-strong); }
-.inspector-frame { position: relative; background: var(--ground); border: 1px solid var(--rule); border-radius: 3px; height: 220px; overflow: hidden; }
+.inspector-frame { position: relative; background: var(--ground); border: 1px solid var(--rule); border-radius: 3px; height: 220px; overflow: hidden; user-select: none; -webkit-user-select: none; }
+.inspector-frame * { user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
 .lane { position: absolute; left: 60px; right: 12px; }
 .chart-lane { top: 16px; height: 70px; border-bottom: 1px solid var(--rule); }
 .input-lane { top: 110px; height: 66px; border-bottom: 1px solid var(--rule); }
@@ -858,6 +859,7 @@ def _render_inspector(row: dict, player: str, judged, replay) -> str:
       let panState = null;
       frame.addEventListener('mousedown', ev => {{
         if (ev.button !== 0) return;
+        ev.preventDefault();
         panState = {{
           startX: ev.clientX,
           startTStart: tStart,
