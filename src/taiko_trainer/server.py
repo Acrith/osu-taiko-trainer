@@ -28,6 +28,7 @@ from .db import (
     discover_players,
     get_all_maps,
     get_map,
+    get_map_content,
     get_player,
     get_replays,
     list_map_roots,
@@ -36,9 +37,10 @@ from .db import (
     upsert_player,
     workspace_status,
 )
+from .features import extract_features
 from .report import build_report
 from .sessions import group_sessions
-from .workflow import add_replay
+from .workflow import _parse_bytes_as_osu, add_replay
 
 
 def create_app(workspace: str) -> FastAPI:
@@ -72,10 +74,11 @@ def create_app(workspace: str) -> FastAPI:
     def player_page(name: str):
         conn = open_plays(workspace, name)
         report = build_report(conn)
+        replays = get_replays(conn) if report else []
         conn.close()
         if report is None:
             return HTMLResponse(_render_error(f"No snapshots for player {name!r}. Drop a replay first."), status_code=404)
-        return _render_report(report)
+        return _render_report(report, replays, name)
 
     @app.get("/replay/{player}/{replay_id}", response_class=HTMLResponse)
     def replay_page(player: str, replay_id: int):
@@ -83,6 +86,7 @@ def create_app(workspace: str) -> FastAPI:
         row = conn.execute(
             """
             SELECT r.*, m.title AS map_title, m.version AS map_version, m.creator AS map_creator,
+                   m.md5 AS map_md5_ref,
                    m.rating_speed, m.rating_stamina, m.rating_gimmick,
                    m.rating_technical, m.rating_consistency
             FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
@@ -90,10 +94,19 @@ def create_app(workspace: str) -> FastAPI:
             """,
             (replay_id,),
         ).fetchone()
+        features = None
+        if row:
+            content = get_map_content(conn, row["map_md5_ref"])
+            if content:
+                try:
+                    bm = _parse_bytes_as_osu(content)
+                    features = extract_features(bm)
+                except Exception:
+                    features = None
         conn.close()
         if not row:
             return HTMLResponse(_render_error(f"Replay {replay_id} for {player} not found."), status_code=404)
-        return _render_replay(dict(row))
+        return _render_replay(dict(row), player, features)
 
     # --- upload ---------------------------------------------------------
 
@@ -239,6 +252,14 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .cause-bar .count { font-size: 12px; color: var(--ink-muted); text-align: right; }
 .hint { color: var(--ink-muted); font-size: 12px; }
 .error-banner { background: var(--accent-faint); color: var(--accent); border: 1px solid var(--accent-soft); padding: 12px 16px; border-radius: 4px; font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; }
+.feat-group { margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--rule); }
+.feat-group:first-of-type { border-top: none; padding-top: 4px; margin-top: 8px; }
+.feat-title { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.feat-title > span:first-child { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); font-weight: 500; }
+.feat-title .feat-val { font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
+.feat-row { display: grid; grid-template-columns: 1fr max-content; align-items: baseline; padding: 4px 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.feat-row .k { font-size: 12px; color: var(--ink-muted); }
+.feat-row .v { font-size: 13px; color: var(--ink); }
 """
 
 
@@ -339,7 +360,7 @@ def _render_home(workspace: str, catalog_stats: dict, players: list[dict], roots
     return _html_page("Home", body, active="home")
 
 
-def _render_report(report) -> str:
+def _render_report(report, replays: list[dict] | None = None, player_name: str | None = None) -> str:
     d = report.skill.as_dict()
     max_skill = max(d.values()) or 1
 
@@ -449,16 +470,84 @@ def _render_report(report) -> str:
     <h2>Suggested maps to push {report.weakest_dim}</h2>
     {suggestions_html or "<p class='hint'>No maps available.</p>"}
   </section>
+
+  {_render_replays_table(replays or [], player_name or report.player)}
 """
     return _html_page(f"{report.player} report", body)
 
 
-def _render_replay(row: dict) -> str:
+def _render_replays_table(replays: list[dict], player: str) -> str:
+    if not replays:
+        return ""
+    rows = ""
+    for r in replays:
+        acc = (r.get("accuracy_judged") or 0) * 100
+        misses = r.get("count_miss") or 0
+        stddev = r.get("delta_stddev_ms") or 0
+        cheese = (r.get("cheese_rate") or 0) * 100
+        played = (r.get("played_at") or "")[:16].replace("T", " ")
+        title = (r.get("map_title") or "?")
+        version = (r.get("map_version") or "?")
+        rows += (
+            f'<tr onclick="window.location=\'/replay/{player}/{r["id"]}\'" style="cursor:pointer">'
+            f'<td class="name">{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span></td>'
+            f'<td class="muted">{played}</td>'
+            f'<td>{acc:.2f}%</td>'
+            f'<td style="color: var(--miss);">{misses}</td>'
+            f'<td>{stddev:.1f} ms</td>'
+            f'<td>{cheese:.2f}%</td>'
+            f'</tr>'
+        )
+    return f"""
+  <section class="card">
+    <h2>Replays ({len(replays)})</h2>
+    <p class="hint">click a row to see the per-note breakdown</p>
+    <div style="overflow-x: auto; margin-top: 12px;">
+      <table>
+        <thead><tr>
+          <th>map</th><th>played</th><th>acc</th><th>miss</th><th>Δ σ</th><th>cheese</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </section>"""
+
+
+def _render_replay(row: dict, player: str, features=None) -> str:
+    import json as _json
+
+    causes_html = ""
+    if row.get("classification_json"):
+        try:
+            causes = _json.loads(row["classification_json"])
+        except Exception:
+            causes = {}
+        if causes:
+            total = sum(causes.values()) or 1
+            ordered = sorted(causes.items(), key=lambda kv: -kv[1])
+            for cause, n in ordered:
+                if n == 0: continue
+                pct = n / total * 100
+                color = _CAUSE_COLORS.get(cause, "var(--ink-faint)")
+                causes_html += (
+                    f'<div class="cause-bar">'
+                    f'<span class="name">{cause.replace("_", "-")}</span>'
+                    f'<div class="track"><div class="fill" style="width: {pct:.1f}%; background: {color};"></div></div>'
+                    f'<span class="count">{n}  ({pct:.1f}%)</span>'
+                    f'</div>'
+                )
+    causes_section = (
+        f'<section class="card"><h2>Miss causes (this replay)</h2>{causes_html}</section>'
+        if causes_html else ""
+    )
+
+    features_section = _render_features_panel(features) if features else ""
+
     body = f"""
   <section>
-    <span class="eyebrow">replay #{row['id']}</span>
+    <span class="eyebrow"><a href="/player/{player}" style="color: var(--ink-muted);">← {player}</a>  ·  replay #{row['id']}</span>
     <h1>{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
-    <p class="hint">played by <b>{row['player']}</b> at {row['played_at'][:19]}</p>
+    <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}</p>
   </section>
 
   <section class="stats-row">
@@ -480,12 +569,91 @@ def _render_replay(row: dict) -> str:
     </div>
   </section>
 
+  {features_section}
+
+  {causes_section}
+
   <section class="card">
     <h2>Timing</h2>
-    <p class="hint">delta mean {row['delta_mean_ms']:.1f} ms  ·  σ {row['delta_stddev_ms']:.1f} ms  ·  cheese rate {row['cheese_rate']*100:.2f}%</p>
+    <p class="hint">delta mean {row['delta_mean_ms']:.1f} ms  ·  σ {row['delta_stddev_ms']:.1f} ms  ·  cheese rate {row['cheese_rate']*100:.2f}%  ·  fast-cheese pairs {row.get('fast_cheese_pairs', 0)}</p>
   </section>
 """
     return _html_page(f"replay #{row['id']}", body)
+
+
+def _render_features_panel(f) -> str:
+    """Show the numbers that drove each rating dimension. `f` is a MapFeatures."""
+    d = f.density
+    m = f.movement
+    c = f.color
+    r = f.rhythm
+    b = f.bursts
+    g = f.gimmick
+    s = f.strain
+
+    # divisor mix (top 4 shares, ignore "other" if trivial)
+    div_items = sorted(r.divisor_share.items(), key=lambda kv: -kv[1])[:4]
+    div_row = "  ·  ".join(f"{k} {v*100:.0f}%" for k, v in div_items if v > 0.01)
+
+    same_bpm = abs(m.bpm_min - m.bpm_max) < 0.5
+    bpm_str = f"{m.bpm_max:.0f}" if same_bpm else f"{m.bpm_min:.0f}–{m.bpm_max:.0f}"
+    duration_str = f"{int(d.duration_s)//60}:{int(d.duration_s)%60:02d}"
+
+    return f"""
+  <section class="card">
+    <h2>Why this rating</h2>
+    <p class="hint">the underlying feature numbers, grouped by the dimension they feed</p>
+
+    <div class="feat-group">
+      <div class="feat-title"><span>speed</span><span class="feat-val">{bpm_str} BPM · peak burst {d.peak_nps_200ms:.0f} n/s</span></div>
+      <div class="feat-row"><span class="k">BPM range</span><span class="v">{bpm_str}</span></div>
+      <div class="feat-row"><span class="k">peak 200ms burst</span><span class="v">{d.peak_nps_200ms:.1f} notes/s</span></div>
+      <div class="feat-row"><span class="k">peak 1s NPS</span><span class="v">{d.peak_nps:.1f}</span></div>
+      <div class="feat-row"><span class="k">dominant divisor</span><span class="v">{r.dominant_divisor} ({r.dominant_divisor_share*100:.0f}%)</span></div>
+    </div>
+
+    <div class="feat-group">
+      <div class="feat-title"><span>stamina</span><span class="feat-val">avg {d.avg_nps:.1f} n/s over {duration_str}</span></div>
+      <div class="feat-row"><span class="k">duration</span><span class="v">{duration_str}</span></div>
+      <div class="feat-row"><span class="k">hittable notes</span><span class="v">{f.hittable_notes}</span></div>
+      <div class="feat-row"><span class="k">avg NPS</span><span class="v">{d.avg_nps:.1f}</span></div>
+      <div class="feat-row"><span class="k">peak 5s NPS</span><span class="v">{d.peak_nps_5s:.1f}</span></div>
+      <div class="feat-row"><span class="k">high-density ratio</span><span class="v">{d.high_density_ratio*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">longest sustained</span><span class="v">{d.longest_sustained_high_s:.0f} s</span></div>
+      <div class="feat-row"><span class="k">strain (integrated)</span><span class="v">{s.total:.0f}</span></div>
+      <div class="feat-row"><span class="k">fatiguing windows</span><span class="v">{s.fatiguing_windows}</span></div>
+    </div>
+
+    <div class="feat-group">
+      <div class="feat-title"><span>technical</span><span class="feat-val">mono max {c.run_length_max} · 1/6 share {r.divisor_share.get('1/6', 0)*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">mono-run max</span><span class="v">{c.run_length_max}</span></div>
+      <div class="feat-row"><span class="k">mono-run mean</span><span class="v">{c.run_length_mean:.1f}</span></div>
+      <div class="feat-row"><span class="k">mono-stream ratio</span><span class="v">{c.mono_stream_ratio*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">divisor mix</span><span class="v" style="font-size: 11px;">{div_row}</span></div>
+      <div class="feat-row"><span class="k">color-change ratio</span><span class="v">{c.color_change_ratio*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">don share</span><span class="v">{c.don_ratio*100:.0f}%</span></div>
+    </div>
+
+    <div class="feat-group">
+      <div class="feat-title"><span>gimmick</span><span class="feat-val">SV σ {m.sv_stddev:.3f} · SV changes/min {m.sv_changes_per_minute:.1f}</span></div>
+      <div class="feat-row"><span class="k">SV range</span><span class="v">{m.sv_min:.2f} — {m.sv_max:.2f}</span></div>
+      <div class="feat-row"><span class="k">SV stddev</span><span class="v">{m.sv_stddev:.3f}</span></div>
+      <div class="feat-row"><span class="k">SV changes/min</span><span class="v">{m.sv_changes_per_minute:.1f}</span></div>
+      <div class="feat-row"><span class="k">low-SV share</span><span class="v">{g.low_sv_share*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">unreadable ratio</span><span class="v">{g.unreadable_ratio*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">sv-bpm score</span><span class="v">{g.sv_bpm_score:.1f}</span></div>
+    </div>
+
+    <div class="feat-group">
+      <div class="feat-title"><span>consistency</span><span class="feat-val">parity {f.parity.hostile_ratio*100:.0f}% hostile · bursts {b.burst_count}</span></div>
+      <div class="feat-row"><span class="k">parity mean</span><span class="v">{f.parity.mean:.2f}</span></div>
+      <div class="feat-row"><span class="k">parity hostile ratio</span><span class="v">{f.parity.hostile_ratio*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">burst count</span><span class="v">{b.burst_count}</span></div>
+      <div class="feat-row"><span class="k">burst mean length</span><span class="v">{b.mean_length:.1f}</span></div>
+      <div class="feat-row"><span class="k">longest burst</span><span class="v">{b.max_length}</span></div>
+      <div class="feat-row"><span class="k">long-burst share (≥7)</span><span class="v">{b.length_7plus_ratio*100:.0f}%</span></div>
+    </div>
+  </section>"""
 
 
 def _render_error(message: str) -> str:
