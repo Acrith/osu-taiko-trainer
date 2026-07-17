@@ -15,9 +15,20 @@ from .db import (
     get_snapshot_history,
     open_plays,
 )
-from .player import PlayerSkill
+from .player import PlayerSkill, _ACC_FLOOR, _ACC_CEIL, _DECAY, _accuracy_scaling
 from .sessions import Session, group_sessions
 from .suggest import MapSuggestion, find_weakest_dim, suggest_maps
+
+
+@dataclass(frozen=True)
+class SkillContribution:
+    map_title: str
+    map_diff: str
+    map_md5: str
+    replay_id: int
+    accuracy: float
+    raw_rating: float       # the map's rating for this dim
+    weighted: float         # what this replay actually contributed to the skill sum
 
 
 @dataclass(frozen=True)
@@ -36,6 +47,7 @@ class TrainingReport:
     suggestions: tuple[MapSuggestion, ...]
     latest_session: Session | None
     previous_session: Session | None
+    dim_contributors: dict[str, tuple[SkillContribution, ...]] = None  # top-5 per dim
 
 
 def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingReport | None:
@@ -118,7 +130,44 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
         suggestions=tuple(suggestions),
         latest_session=latest_session,
         previous_session=previous_session,
+        dim_contributors=_compute_dim_contributors(replays),
     )
+
+
+_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency")
+
+
+def _compute_dim_contributors(replays: list[dict], top_n: int = 5) -> dict[str, tuple[SkillContribution, ...]]:
+    """Mirror player.compute_player_skill's per-dim weighting so the caller can show
+    which replays drove each dimension's skill number. Rank is by desc contribution
+    (map_rating * accuracy_scaling), weight = 0.9^rank."""
+    result: dict[str, tuple[SkillContribution, ...]] = {}
+    for dim in _DIMS:
+        rating_col = f"rating_{dim}"
+        candidates: list[tuple[float, dict]] = []
+        for r in replays:
+            rating = r.get(rating_col) or 0.0
+            acc = r.get("accuracy_judged") or 0.0
+            scale = _accuracy_scaling(acc)
+            contribution = rating * scale
+            if contribution <= 0:
+                continue
+            candidates.append((contribution, r))
+        candidates.sort(key=lambda kv: -kv[0])
+        contribs: list[SkillContribution] = []
+        for rank, (contribution, r) in enumerate(candidates[:top_n]):
+            weight = _DECAY ** rank
+            contribs.append(SkillContribution(
+                map_title=r.get("map_title") or "?",
+                map_diff=r.get("map_version") or "?",
+                map_md5=r.get("map_md5") or "",
+                replay_id=int(r["id"]),
+                accuracy=r.get("accuracy_judged") or 0.0,
+                raw_rating=r.get(rating_col) or 0.0,
+                weighted=contribution * weight,
+            ))
+        result[dim] = tuple(contribs)
+    return result
 
 
 _STYLE_LABELS = {

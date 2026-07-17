@@ -38,8 +38,10 @@ from .db import (
     workspace_status,
 )
 from .features import extract_features
+from .player import PlayerSkill
 from .report import build_report
 from .sessions import group_sessions
+from .suggest import suggest_maps
 from .workflow import _parse_bytes_as_osu, add_replay
 
 
@@ -79,6 +81,23 @@ def create_app(workspace: str) -> FastAPI:
         if report is None:
             return HTMLResponse(_render_error(f"No snapshots for player {name!r}. Drop a replay first."), status_code=404)
         return _render_report(report, replays, name)
+
+    @app.get("/player/{name}/train/{dim}", response_class=HTMLResponse)
+    def train_page(name: str, dim: str):
+        if dim not in ("speed", "stamina", "gimmick", "technical", "consistency"):
+            return HTMLResponse(_render_error(f"unknown dimension: {dim}"), status_code=400)
+        conn = open_plays(workspace, name)
+        report = build_report(conn, top_n_maps=25)
+        replays = get_replays(conn) if report else []
+        if report is None:
+            conn.close()
+            return HTMLResponse(_render_error(f"No snapshots for player {name!r}."), status_code=404)
+        played_md5s = {r["map_md5"] for r in replays}
+        suggestions = suggest_maps(
+            conn, report.skill, dim, top_n=25, exclude_md5s=played_md5s,
+        )
+        conn.close()
+        return _render_train_page(name, dim, report.skill, suggestions, report.dim_contributors.get(dim, ()))
 
     @app.get("/replay/{player}/{replay_id}", response_class=HTMLResponse)
     def replay_page(player: str, replay_id: int):
@@ -260,7 +279,30 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .feat-row { display: grid; grid-template-columns: 1fr max-content; align-items: baseline; padding: 4px 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .feat-row .k { font-size: 12px; color: var(--ink-muted); }
 .feat-row .v { font-size: 13px; color: var(--ink); }
+.dim-block { margin-bottom: 12px; }
+.dim-bar { text-decoration: none !important; color: inherit; border-radius: 3px; padding: 8px 8px; margin: 0 -8px; transition: background 0.1s; }
+.dim-bar:hover { background: var(--accent-faint); text-decoration: none; }
+.contrib-list { padding: 6px 0 4px 108px; margin: 0 -8px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.contrib-row { display: grid; grid-template-columns: 1fr max-content max-content; align-items: baseline; gap: 12px; padding: 3px 0; font-size: 11px; }
+.contrib-map { color: var(--ink-muted); text-decoration: none; }
+.contrib-map:hover { color: var(--accent); }
+.contrib-map .muted { color: var(--ink-faint); }
+.contrib-val { color: var(--ink); font-weight: 500; }
+.contrib-meta { color: var(--ink-faint); font-size: 10px; }
+.fc-badge { display: inline-block; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; padding: 2px 6px; border-radius: 3px; vertical-align: middle; margin-right: 6px; font-weight: 600; }
+.fc-badge.fc { background: var(--great); color: white; }
+.fc-badge.ss { background: linear-gradient(90deg, #d4af37, #f1d475); color: #3a2a00; }
+h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 """
+
+
+def _fc_badge(misses: int, oks: int) -> str:
+    """Inline badge shown before the map title in listings."""
+    if misses == 0 and oks == 0:
+        return '<span class="fc-badge ss">SS</span> '
+    if misses == 0:
+        return '<span class="fc-badge fc">FC</span> '
+    return ""
 
 
 _CAUSE_COLORS = {
@@ -366,6 +408,7 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
 
     dim_bars = ""
     ordered = sorted(d.items(), key=lambda kv: -kv[1])
+    contribs_map = getattr(report, "dim_contributors", None) or {}
     for dim, val in ordered:
         pct = min(100, val / max_skill * 100)
         is_weakest = dim == report.weakest_dim
@@ -378,12 +421,30 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
                 delta_html = f'<span class="delta up">↑ +{delta:.0f}</span>'
             else:
                 delta_html = f'<span class="delta down">↓ {delta:.0f}</span>'
+
+        # Top-3 contributors under each bar — shows WHY the number is what it is.
+        contribs = contribs_map.get(dim, ())[:3]
+        contribs_html = ""
+        if contribs:
+            rows = "".join(
+                f'<div class="contrib-row">'
+                f'<a href="/replay/{player_name}/{c.replay_id}" class="contrib-map">{c.map_title[:44]} <span class="muted">[{c.map_diff[:18]}]</span></a>'
+                f'<span class="contrib-val">+{c.weighted:.0f}</span>'
+                f'<span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.1f}%</span>'
+                f'</div>'
+                for c in contribs
+            )
+            contribs_html = f'<div class="contrib-list">{rows}</div>'
+
         dim_bars += (
-            f'<div class="dim-bar {"weakest" if is_weakest else ""}">'
+            f'<div class="dim-block">'
+            f'<a href="/player/{player_name}/train/{dim}" class="dim-bar {"weakest" if is_weakest else ""}">'
             f'<span class="name">{dim}{"  ★" if is_weakest else ""}</span>'
             f'<div class="track"><div class="fill" style="width: {pct:.1f}%"></div></div>'
             f'<span class="val">{val:.0f}</span>'
             f"{delta_html}"
+            f"</a>"
+            f"{contribs_html}"
             f"</div>"
         )
 
@@ -476,6 +537,74 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
     return _html_page(f"{report.player} report", body)
 
 
+_DIM_TAGLINE = {
+    "speed":       "motor tempo — how fast your hands alternate",
+    "stamina":     "endurance — long high-density stretches without dropping",
+    "gimmick":     "reading pressure — SV variance, obscured densities",
+    "technical":   "pattern awareness — mono runs, mixed divisors, parity",
+    "consistency": "unwavering timing — no random drops from bursts / parity flips",
+}
+
+
+def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> str:
+    d = skill.as_dict()
+    val = d[dim]
+
+    contribs_html = ""
+    if contribs:
+        rows = "".join(
+            f'<div class="contrib-row" style="grid-template-columns: 24px 1fr max-content max-content;">'
+            f'<span class="contrib-meta">#{i+1}</span>'
+            f'<a href="/replay/{player}/{c.replay_id}" class="contrib-map">{c.map_title} <span class="muted">[{c.map_diff}]</span></a>'
+            f'<span class="contrib-val">+{c.weighted:.0f}</span>'
+            f'<span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.1f}%</span>'
+            f'</div>'
+            for i, c in enumerate(contribs)
+        )
+        contribs_html = (
+            f'<section class="card"><h2>What drove your {dim} = {val:.0f}</h2>'
+            f'<p class="hint">weighted top-K aggregation from your play history</p>'
+            f'<div class="contrib-list" style="padding-left: 0;">{rows}</div>'
+            f'</section>'
+        )
+
+    sugg_html = ""
+    if suggestions:
+        for i, s in enumerate(suggestions, 1):
+            if s.suggestion_score < 0.05:
+                continue
+            fit = ("excellent" if s.suggestion_score > 0.75
+                   else "good" if s.suggestion_score > 0.4
+                   else "modest")
+            sugg_html += (
+                f'<div style="padding: 12px 0; border-bottom: 1px dashed var(--rule);">'
+                f'<div style="font-family: var(--font-mono); color: var(--ink);">{i}. {s.title} <span style="color: var(--ink-muted);">[{s.version}]</span></div>'
+                f'<div style="font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); margin-top: 4px;">'
+                f'rating[{s.target_dim}]={s.target_rating:.0f}  ·  growth {s.target_gain_frac*100:+.0f}%  ·  fit {fit}  ·  by {s.creator}'
+                f'</div></div>'
+            )
+    if not sugg_html.strip():
+        sugg_html = "<p class='hint'>No maps in catalog with growth potential for this dimension. Ingest more via the drop-zone.</p>"
+
+    tagline = _DIM_TAGLINE.get(dim, "")
+    body = f"""
+  <section>
+    <span class="eyebrow"><a href="/player/{player}" style="color: var(--ink-muted);">← {player} report</a>  ·  training</span>
+    <h1>Push your {dim}</h1>
+    <p class="hint">{tagline}  ·  current skill: <b>{val:.0f}</b></p>
+  </section>
+
+  {contribs_html}
+
+  <section class="card">
+    <h2>Maps to grow {dim}</h2>
+    <p class="hint">ranked by growth-vs-overwhelm score for your current profile</p>
+    {sugg_html}
+  </section>
+"""
+    return _html_page(f"train {dim} — {player}", body)
+
+
 def _render_replays_table(replays: list[dict], player: str) -> str:
     if not replays:
         return ""
@@ -483,17 +612,23 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
     for r in replays:
         acc = (r.get("accuracy_judged") or 0) * 100
         misses = r.get("count_miss") or 0
+        oks = r.get("count_ok") or 0
         stddev = r.get("delta_stddev_ms") or 0
         cheese = (r.get("cheese_rate") or 0) * 100
         played = (r.get("played_at") or "")[:16].replace("T", " ")
         title = (r.get("map_title") or "?")
         version = (r.get("map_version") or "?")
+        badge = _fc_badge(misses, oks)
+        miss_cell = (
+            f'<td style="color: var(--great);">FC</td>' if misses == 0
+            else f'<td style="color: var(--miss);">{misses}</td>'
+        )
         rows += (
             f'<tr onclick="window.location=\'/replay/{player}/{r["id"]}\'" style="cursor:pointer">'
-            f'<td class="name">{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span></td>'
+            f'<td class="name">{badge}{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span></td>'
             f'<td class="muted">{played}</td>'
             f'<td>{acc:.2f}%</td>'
-            f'<td style="color: var(--miss);">{misses}</td>'
+            f'{miss_cell}'
             f'<td>{stddev:.1f} ms</td>'
             f'<td>{cheese:.2f}%</td>'
             f'</tr>'
@@ -542,11 +677,12 @@ def _render_replay(row: dict, player: str, features=None) -> str:
     )
 
     features_section = _render_features_panel(features) if features else ""
+    header_badge = _fc_badge(row.get("count_miss", 1), row.get("count_ok", 1))
 
     body = f"""
   <section>
     <span class="eyebrow"><a href="/player/{player}" style="color: var(--ink-muted);">← {player}</a>  ·  replay #{row['id']}</span>
-    <h1>{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
+    <h1>{header_badge}{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
     <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}</p>
   </section>
 
