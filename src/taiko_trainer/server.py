@@ -129,7 +129,7 @@ def create_app(workspace: str) -> FastAPI:
         finally:
             Path(tmp_path).unlink(missing_ok=True)
         judged = judge_replay(bm, rp)
-        return _render_inspector(dict(row), player, judged)
+        return _render_inspector(dict(row), player, judged, rp)
 
     @app.get("/replay/{player}/{replay_id}", response_class=HTMLResponse)
     def replay_page(player: str, replay_id: int):
@@ -326,44 +326,55 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .fc-badge.ss { background: linear-gradient(90deg, #d4af37, #f1d475); color: #3a2a00; }
 h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 
-/* --- inspector --- */
-.inspector-toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
-.inspector-toolbar label { display: flex; align-items: center; gap: 8px; }
-.inspector-toolbar input[type=range] { width: 200px; }
-.inspector-legend { display: flex; gap: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+/* --- inspector (fits container; range scrubber pans/zooms) --- */
+.inspector-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.inspector-legend { display: flex; gap: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); align-items: center; }
 .inspector-legend > span { display: inline-flex; align-items: center; gap: 4px; }
 .inspector-legend .lg { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
 .inspector-legend .lg.don { background: var(--accent); }
 .inspector-legend .lg.kat { background: var(--accent-cool); }
-.inspector-legend .lg.great { background: var(--great); }
-.inspector-legend .lg.ok { background: var(--ok); }
-.inspector-legend .lg.miss { background: var(--miss); }
-.jump-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 0 14px; border-bottom: 1px dashed var(--rule); margin-bottom: 12px; }
-.jump-chip { font-family: var(--font-mono); font-size: 11px; background: var(--accent-faint); color: var(--accent); border: 1px solid var(--accent-soft); border-radius: 3px; padding: 3px 8px; cursor: pointer; }
-.jump-chip:hover { background: var(--accent); color: white; }
-.inspector-wrap { overflow-x: auto; overflow-y: hidden; background: var(--ground); border: 1px solid var(--rule); border-radius: 3px; }
-.inspector-track { position: relative; height: 200px; min-width: 100%; }
-.lane { position: absolute; left: 0; right: 0; height: 60px; }
-.chart-lane { top: 20px; border-bottom: 1px solid var(--rule); }
-.input-lane { top: 100px; border-bottom: 1px solid var(--rule); }
-.lane-label { position: absolute; left: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); z-index: 2; background: var(--ground); padding: 0 4px; }
-.chart-label { top: 4px; }
-.input-label { top: 84px; }
-.lane .n { position: absolute; top: 50%; border-radius: 50%; transform: translate(-50%, -50%); }
+.inspector-legend .lg.band-legend { border-radius: 2px; width: 4px; height: 12px; }
+.inspector-legend .lg.miss { background: var(--miss); opacity: 0.55; }
+.inspector-legend .lg.ok { background: var(--ok); opacity: 0.35; }
+.inspector-btn { font-family: var(--font-mono); font-size: 11px; background: var(--panel); color: var(--ink-muted); border: 1px solid var(--rule); border-radius: 3px; padding: 4px 12px; cursor: pointer; }
+.inspector-btn:hover { color: var(--ink); border-color: var(--rule-strong); }
+.inspector-frame { position: relative; background: var(--ground); border: 1px solid var(--rule); border-radius: 3px; height: 220px; overflow: hidden; }
+.lane { position: absolute; left: 60px; right: 12px; }
+.chart-lane { top: 16px; height: 70px; border-bottom: 1px solid var(--rule); }
+.input-lane { top: 110px; height: 66px; border-bottom: 1px solid var(--rule); }
+.input-lane .hand-divider { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--rule); opacity: 0.6; }
+.bands { position: absolute; left: 60px; right: 12px; top: 16px; bottom: 44px; pointer-events: none; z-index: 0; }
+.bands .band { position: absolute; top: 0; bottom: 0; width: 3px; transform: translateX(-50%); }
+.bands .band.miss { background: var(--miss); opacity: 0.35; }
+.bands .band.ok { background: var(--ok); opacity: 0.18; }
+.lane-label { position: absolute; left: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); z-index: 3; }
+.chart-label { top: 40px; }
+.input-label { top: 130px; }
+.lane .n { position: absolute; border-radius: 50%; transform: translate(-50%, -50%); z-index: 1; }
+.chart-lane .n { top: 50%; }
 .chart-lane .n.sm { width: 8px; height: 8px; }
-.chart-lane .n.big { width: 14px; height: 14px; border: 1px solid rgba(255,255,255,0.4); }
+.chart-lane .n.big { width: 14px; height: 14px; box-shadow: 0 0 0 1px rgba(255,255,255,0.35) inset; }
 .chart-lane .n.don { background: var(--accent); }
 .chart-lane .n.kat { background: var(--accent-cool); }
 .input-lane .n { width: 7px; height: 7px; }
-.input-lane .n.great { background: var(--great); }
-.input-lane .n.ok { background: var(--ok); }
-.input-lane .n.miss { width: 10px; height: 10px; background: var(--miss); border: 2px solid var(--miss); }
-.input-lane .n.miss::before, .input-lane .n.miss::after { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 2px; background: white; }
-.input-lane .n.miss::before { transform: rotate(45deg); }
-.input-lane .n.miss::after { transform: rotate(-45deg); }
-.axis { position: absolute; top: 165px; left: 0; right: 0; height: 30px; border-top: 1px solid var(--rule); }
-.axis .tick { position: absolute; top: 4px; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); transform: translateX(-50%); }
+.input-lane .n.don { background: var(--accent); }
+.input-lane .n.kat { background: var(--accent-cool); }
+.input-lane .n.hL { top: 25%; }
+.input-lane .n.hR { top: 75%; }
+.axis { position: absolute; left: 60px; right: 12px; bottom: 0; height: 30px; border-top: 1px solid var(--rule); }
+.axis .tick { position: absolute; top: 4px; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); transform: translateX(-50%); white-space: nowrap; }
 .axis .tick::before { content: ''; position: absolute; top: -6px; left: 50%; width: 1px; height: 6px; background: var(--rule); transform: translateX(-50%); }
+
+/* range scrubber */
+.scrubber { margin-top: 16px; }
+.scrub-track { position: relative; height: 34px; background: var(--ground); border: 1px solid var(--rule); border-radius: 3px; user-select: none; margin: 0 60px 0 60px; }
+.scrub-mini { position: absolute; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; }
+.scrub-mini .mini-tick { position: absolute; top: 4px; width: 1px; height: 10px; background: var(--miss); opacity: 0.6; transform: translateX(-50%); }
+.scrub-window { position: absolute; top: 0; bottom: 0; background: var(--accent-faint); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); cursor: grab; z-index: 1; }
+.scrub-window:active { cursor: grabbing; }
+.scrub-handle { position: absolute; top: -3px; width: 8px; height: 40px; background: var(--accent); border-radius: 2px; cursor: ew-resize; transform: translateX(-50%); z-index: 2; }
+.scrub-handle::after { content: ''; position: absolute; top: 8px; bottom: 8px; left: 3px; width: 2px; background: rgba(255,255,255,0.6); }
+.scrub-labels { display: flex; justify-content: space-between; margin: 8px 60px 0 60px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
 """
 
 
@@ -608,9 +619,12 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
     return _html_page(f"{report.player} report", body)
 
 
-def _render_inspector(row: dict, player: str, judged) -> str:
-    """Two-lane timeline: notes above, player inputs below, misses flagged."""
+def _render_inspector(row: dict, player: str, judged, replay) -> str:
+    """LOA-style timeline: fits container, dual-handle range scrubber pans/zooms.
+    Chart lane shows notes; input lane shows every real key press from the replay
+    (not just judgment-matched ones); miss/ok events are vertical background bands."""
     from .judgment import Verdict as _V
+    from .models import TaikoInput as _TI
 
     judgments = judged.judgments
     if not judgments:
@@ -618,43 +632,54 @@ def _render_inspector(row: dict, player: str, judged) -> str:
 
     start_ms = min(j.note.time_ms for j in judgments)
     end_ms = max(j.note.time_ms for j in judgments)
-    if judged.judgments and any(j.hit_time_ms is not None for j in judgments):
-        end_ms = max(end_ms, max((j.hit_time_ms or 0) for j in judgments))
+    for f in replay.frames:
+        if f.time_ms > end_ms and f.time_ms - start_ms < 15 * 60 * 1000:
+            end_ms = f.time_ms
     duration_s = max(1.0, (end_ms - start_ms) / 1000)
 
-    # Emit each note as a lightweight <span> with time offset from start (in seconds).
-    # JS positions it later — server just carries the data.
+    # ---- chart notes ------------------------------------------------------
     note_spans = []
-    input_spans = []
-    misses: list[tuple[float, str]] = []
     for j in judgments:
-        t_note = (j.note.time_ms - start_ms) / 1000
+        t = (j.note.time_ms - start_ms) / 1000
         color = "don" if j.note.note_type.is_don else "kat"
         size = "big" if j.note.note_type.is_big else "sm"
         note_spans.append(
-            f'<span class="n {color} {size}" data-t="{t_note:.3f}"></span>'
+            f'<span class="n {color} {size}" data-t="{t:.3f}"></span>'
         )
-        if j.verdict is _V.MISS:
-            input_spans.append(
-                f'<span class="n miss" data-t="{t_note:.3f}" title="MISS @ {t_note:.2f}s"></span>'
-            )
-            misses.append((t_note, f"{j.note.note_type.is_don and 'D' or 'K'}"))
-        else:
-            t_hit = ((j.hit_time_ms or j.note.time_ms) - start_ms) / 1000
-            v_class = "great" if j.verdict is _V.GREAT else "ok"
-            delta = j.hit_delta_ms or 0
-            input_spans.append(
-                f'<span class="n {v_class}" data-t="{t_hit:.3f}" title="{j.verdict.value.upper()} Δ{delta:+d}ms"></span>'
-            )
 
-    # Miss jump list — clickable list of every miss's time.
-    miss_jumps_html = ""
-    if misses:
-        chips = "".join(
-            f'<button class="jump-chip" data-t="{t:.2f}">{int(t)//60}:{int(t)%60:02d}.{int((t%1)*100):02d}</button>'
-            for t, _ in misses[:40]
-        )
-        miss_jumps_html = f'<div class="jump-list"><span class="hint">jump to miss:</span>{chips}</div>'
+    # ---- verdict bands (miss = strong; ok = subtle) ----------------------
+    band_spans = []
+    misses: list[float] = []
+    for j in judgments:
+        t = (j.note.time_ms - start_ms) / 1000
+        if j.verdict is _V.MISS:
+            band_spans.append(f'<span class="band miss" data-t="{t:.3f}"></span>')
+            misses.append(t)
+        elif j.verdict is _V.OK:
+            band_spans.append(f'<span class="band ok" data-t="{t:.3f}"></span>')
+
+    # ---- input events: every rising-edge press from the replay ----------
+    key_map = {
+        _TI.LEFT_KAT:  ("kat", "L"),   # KDDK: outer L = kat left
+        _TI.LEFT_DON:  ("don", "L"),
+        _TI.RIGHT_DON: ("don", "R"),
+        _TI.RIGHT_KAT: ("kat", "R"),
+    }
+    input_spans = []
+    for f in replay.frames:
+        if not f.pressed:
+            continue
+        t = (f.time_ms - start_ms) / 1000
+        if t < -0.5 or t > duration_s + 0.5:
+            continue
+        for bit, (color, hand) in key_map.items():
+            if f.pressed & bit:
+                input_spans.append(
+                    f'<span class="n {color} h{hand}" data-t="{t:.3f}"></span>'
+                )
+
+    # ---- miss density mini-map (below the range slider) ----
+    mini_ticks = "".join(f'<span class="mini-tick" data-t="{t:.3f}"></span>' for t in misses)
 
     total_notes = len(judgments)
     body = f"""
@@ -669,29 +694,40 @@ def _render_inspector(row: dict, player: str, judged) -> str:
 
   <section class="card">
     <div class="inspector-toolbar">
-      <label class="hint">zoom
-        <input id="zoom-slider" type="range" min="40" max="600" value="150" step="10">
-        <span id="zoom-val" class="hint" style="font-family: var(--font-mono);">150 px/s</span>
-      </label>
-      <div style="flex:1"></div>
       <div class="inspector-legend">
         <span><span class="lg don"></span>don</span>
         <span><span class="lg kat"></span>kat</span>
-        <span><span class="lg great"></span>great</span>
-        <span><span class="lg ok"></span>ok</span>
-        <span><span class="lg miss"></span>miss</span>
+        <span><span class="lg band-legend miss"></span>miss</span>
+        <span><span class="lg band-legend ok"></span>ok</span>
+        <span class="hint" style="margin-left: 16px;">input lane: top row = left hand · bottom row = right hand</span>
       </div>
+      <div style="flex:1"></div>
+      <button id="reset-zoom" class="inspector-btn">reset zoom</button>
     </div>
 
-    {miss_jumps_html}
+    <div class="inspector-frame" id="inspector-frame">
+      <div class="lane-label chart-label">chart</div>
+      <div class="lane-label input-label">input</div>
+      <div class="lane chart-lane" id="chart-lane">{"".join(note_spans)}</div>
+      <div class="bands" id="bands">{"".join(band_spans)}</div>
+      <div class="lane input-lane" id="input-lane">
+        <div class="hand-divider"></div>
+        {"".join(input_spans)}
+      </div>
+      <div class="axis" id="axis"></div>
+    </div>
 
-    <div class="inspector-wrap" id="inspector-wrap">
-      <div class="inspector-track" id="inspector-track">
-        <div class="lane-label chart-label">chart</div>
-        <div class="lane-label input-label">input</div>
-        <div class="lane chart-lane" id="chart-lane">{"".join(note_spans)}</div>
-        <div class="lane input-lane" id="input-lane">{"".join(input_spans)}</div>
-        <div class="axis" id="axis"></div>
+    <div class="scrubber">
+      <div class="scrub-track" id="scrub-track">
+        <div class="scrub-mini">{mini_ticks}</div>
+        <div class="scrub-window" id="scrub-window"></div>
+        <div class="scrub-handle l" id="handle-l"></div>
+        <div class="scrub-handle r" id="handle-r"></div>
+      </div>
+      <div class="scrub-labels">
+        <span id="scrub-start">0:00</span>
+        <span id="scrub-window-info" class="hint"></span>
+        <span id="scrub-end">{int(duration_s)//60}:{int(duration_s)%60:02d}</span>
       </div>
     </div>
   </section>
@@ -699,53 +735,139 @@ def _render_inspector(row: dict, player: str, judged) -> str:
   <script>
     (function() {{
       const duration = {duration_s:.3f};
-      const wrap = document.getElementById('inspector-wrap');
-      const track = document.getElementById('inspector-track');
+      const frame = document.getElementById('inspector-frame');
       const chartLane = document.getElementById('chart-lane');
       const inputLane = document.getElementById('input-lane');
+      const bandsEl = document.getElementById('bands');
       const axis = document.getElementById('axis');
-      const slider = document.getElementById('zoom-slider');
-      const zoomVal = document.getElementById('zoom-val');
-      const noteEls = [...chartLane.children, ...inputLane.children];
+      const chartNotes = [...chartLane.children];
+      const inputNotes = [...inputLane.querySelectorAll('.n')];
+      const bands = [...bandsEl.children];
+      const miniTicks = [...document.getElementById('scrub-track').querySelectorAll('.mini-tick')];
 
-      function renderAxis(pxPerSec) {{
+      let tStart = 0;
+      let tEnd = duration;
+
+      const scrubTrack = document.getElementById('scrub-track');
+      const scrubWindow = document.getElementById('scrub-window');
+      const handleL = document.getElementById('handle-l');
+      const handleR = document.getElementById('handle-r');
+      const windowInfo = document.getElementById('scrub-window-info');
+
+      function fmt(t) {{
+        const m = Math.floor(t / 60);
+        const s = Math.floor(t % 60);
+        return m + ':' + String(s).padStart(2, '0');
+      }}
+
+      function positionEl(el) {{
+        const t = parseFloat(el.dataset.t);
+        if (t < tStart || t > tEnd) {{ el.style.display = 'none'; return; }}
+        el.style.display = '';
+        el.style.left = ((t - tStart) / (tEnd - tStart) * 100) + '%';
+      }}
+
+      function renderAxis() {{
         axis.innerHTML = '';
-        // Choose tick interval based on zoom: aim for a tick every ~80px.
+        const span = tEnd - tStart;
+        // Target ~8 ticks visible.
         let step = 1;
-        while (step * pxPerSec < 80) step *= 2;
-        for (let t = 0; t <= duration; t += step) {{
+        const targetSteps = 8;
+        while (span / step > targetSteps * 2) step *= 2;
+        while (span / step < targetSteps / 2) step /= 2;
+        if (step < 0.5) step = 0.5;
+        const firstTick = Math.ceil(tStart / step) * step;
+        for (let t = firstTick; t <= tEnd; t += step) {{
           const tick = document.createElement('div');
           tick.className = 'tick';
-          tick.style.left = (t * pxPerSec) + 'px';
-          const min = Math.floor(t / 60);
-          const sec = Math.floor(t % 60);
-          tick.textContent = min + ':' + String(sec).padStart(2, '0');
+          tick.style.left = ((t - tStart) / span * 100) + '%';
+          tick.textContent = fmt(t);
           axis.appendChild(tick);
         }}
       }}
 
-      function apply(pxPerSec) {{
-        const totalPx = duration * pxPerSec + 80;
-        track.style.width = totalPx + 'px';
-        for (const el of noteEls) {{
-          const t = parseFloat(el.dataset.t);
-          el.style.left = (t * pxPerSec) + 'px';
+      function refresh() {{
+        for (const el of chartNotes) positionEl(el);
+        for (const el of inputNotes) positionEl(el);
+        for (const el of bands) positionEl(el);
+        renderAxis();
+        // update scrubber visuals
+        const lPct = tStart / duration * 100;
+        const rPct = tEnd / duration * 100;
+        scrubWindow.style.left = lPct + '%';
+        scrubWindow.style.right = (100 - rPct) + '%';
+        handleL.style.left = lPct + '%';
+        handleR.style.left = rPct + '%';
+        windowInfo.textContent = fmt(tStart) + ' — ' + fmt(tEnd) + '  (' + (tEnd - tStart).toFixed(1) + 's window)';
+        for (const t of miniTicks) {{
+          const tv = parseFloat(t.dataset.t);
+          t.style.left = (tv / duration * 100) + '%';
         }}
-        renderAxis(pxPerSec);
-        zoomVal.textContent = pxPerSec + ' px/s';
       }}
 
-      slider.addEventListener('input', () => apply(parseInt(slider.value, 10)));
-      apply(parseInt(slider.value, 10));
+      // --- drag interactions ---
+      function trackPct(clientX) {{
+        const r = scrubTrack.getBoundingClientRect();
+        return Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+      }}
 
-      // Miss-jump chips scroll to the miss position.
-      for (const chip of document.querySelectorAll('.jump-chip')) {{
-        chip.addEventListener('click', () => {{
-          const t = parseFloat(chip.dataset.t);
-          const pxPerSec = parseInt(slider.value, 10);
-          wrap.scrollTo({{ left: t * pxPerSec - wrap.clientWidth / 2, behavior: 'smooth' }});
+      function bindDrag(el, onMove) {{
+        el.addEventListener('mousedown', ev => {{
+          ev.preventDefault();
+          const move = (e) => onMove(trackPct(e.clientX));
+          const up = () => {{ document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); }};
+          document.addEventListener('mousemove', move);
+          document.addEventListener('mouseup', up);
         }});
       }}
+
+      const MIN_WINDOW = Math.max(1.0, duration * 0.005);
+      bindDrag(handleL, pct => {{
+        tStart = Math.min(duration * pct, tEnd - MIN_WINDOW);
+        refresh();
+      }});
+      bindDrag(handleR, pct => {{
+        tEnd = Math.max(duration * pct, tStart + MIN_WINDOW);
+        refresh();
+      }});
+      bindDrag(scrubWindow, pct => {{
+        const width = tEnd - tStart;
+        let center = duration * pct;
+        tStart = Math.max(0, Math.min(duration - width, center - width / 2));
+        tEnd = tStart + width;
+        refresh();
+      }});
+
+      // click on empty scrub area = center window there
+      scrubTrack.addEventListener('click', ev => {{
+        if (ev.target !== scrubTrack) return;
+        const width = tEnd - tStart;
+        const pct = trackPct(ev.clientX);
+        tStart = Math.max(0, Math.min(duration - width, duration * pct - width / 2));
+        tEnd = tStart + width;
+        refresh();
+      }});
+
+      // wheel zoom over the main frame (mouse position = zoom center)
+      frame.addEventListener('wheel', ev => {{
+        ev.preventDefault();
+        const r = frame.getBoundingClientRect();
+        const pct = (ev.clientX - r.left) / r.width;
+        const center = tStart + (tEnd - tStart) * pct;
+        const factor = ev.deltaY > 0 ? 1.25 : 0.8;
+        let width = (tEnd - tStart) * factor;
+        width = Math.max(MIN_WINDOW, Math.min(duration, width));
+        tStart = Math.max(0, center - width * pct);
+        tEnd = Math.min(duration, tStart + width);
+        if (tEnd - tStart < width) tStart = Math.max(0, tEnd - width);
+        refresh();
+      }}, {{ passive: false }});
+
+      document.getElementById('reset-zoom').addEventListener('click', () => {{
+        tStart = 0; tEnd = duration; refresh();
+      }});
+
+      refresh();
     }})();
   </script>
 """
