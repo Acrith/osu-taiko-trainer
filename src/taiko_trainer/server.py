@@ -1871,14 +1871,16 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
             useful = [(t, g) for t, g in paired if g >= 0.5]
             while len(useful) < 3:
                 useful.append((None, 0.0))
-            ceiling_note = ""
             if not any(g >= 0.5 for t, g in paired):
-                ceiling_note = (
-                    '<span class="tr target-ceiling" style="grid-column: span 3;">'
-                    'no meaningful gain — accuracy_scaling saturates above 99.5%'
-                    '</span>'
+                if c.accuracy >= 0.9999:
+                    note = "already SS"
+                else:
+                    note = "SS gain rounds to 0 at this rank"
+                cells_html = (
+                    f'<span class="tr target-ceiling" style="grid-column: span 3;">'
+                    f'{note}'
+                    f'</span>'
                 )
-                cells_html = ceiling_note
             else:
                 cells_html = "".join(_fmt_target_cell(t, g) for t, g in useful)
             parts.append(
