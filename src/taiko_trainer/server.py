@@ -207,9 +207,11 @@ def create_app(workspace: str) -> FastAPI:
         conn = open_plays(workspace, player)
         row = conn.execute(
             """
-            SELECT r.*, m.title AS map_title, m.version AS map_version, m.creator AS map_creator,
+            SELECT r.*, m.title AS map_title, m.artist AS map_artist,
+                   m.version AS map_version, m.creator AS map_creator,
                    m.md5 AS map_md5_ref,
                    m.beatmap_id, m.beatmapset_id,
+                   m.duration_s, m.hittable_notes, m.bpm_min, m.bpm_max, m.od,
                    m.rating_speed, m.rating_stamina, m.rating_gimmick,
                    m.rating_technical, m.rating_consistency
             FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
@@ -444,6 +446,121 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-map .muted { color: var(--ink-faint); }
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
+.eyebrow-row { margin-bottom: -20px; }
+.map-hero {
+  position: relative;
+  min-height: 260px;
+  background-size: cover;
+  background-position: center;
+  background-color: #16181D;
+  border-radius: 6px;
+  overflow: hidden;
+  color: #EFE9DE;
+  border: 1px solid var(--rule);
+}
+.hero-inner {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 32px;
+  padding: 28px 32px;
+  height: 100%;
+  min-height: 260px;
+}
+@media (max-width: 800px) {
+  .hero-inner { grid-template-columns: 1fr; }
+}
+.hero-left { display: flex; flex-direction: column; justify-content: flex-end; gap: 10px; }
+.hero-pill-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.diff-pill {
+  display: inline-block;
+  padding: 5px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  background: rgba(255,255,255,0.14);
+  color: white;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.28);
+  backdrop-filter: blur(6px);
+}
+.hero-fc {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  padding: 4px 10px;
+  border-radius: 3px;
+  font-weight: 700;
+}
+.hero-fc.fc { background: var(--great); color: white; }
+.hero-fc.ss { background: linear-gradient(90deg, #d4af37, #f1d475); color: #3a2a00; }
+.hero-title {
+  font-family: var(--font-mono);
+  font-size: 42px;
+  line-height: 1.05;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: white;
+  margin: 0;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  text-wrap: balance;
+}
+.hero-artist {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  color: rgba(255,255,255,0.72);
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+.hero-meta {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+  margin: 4px 0 0 0;
+}
+.hero-actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.hero-btn {
+  display: inline-block;
+  padding: 9px 18px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  background: rgba(255,255,255,0.10);
+  color: rgba(255,255,255,0.9);
+  border: 1px solid rgba(255,255,255,0.22);
+  border-radius: 4px;
+  text-decoration: none;
+  backdrop-filter: blur(6px);
+  transition: background 0.15s, border-color 0.15s;
+}
+.hero-btn:hover { background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.42); text-decoration: none; }
+.hero-btn.primary { background: var(--accent); border-color: var(--accent); }
+.hero-btn.primary:hover { background: #d0453e; }
+.hero-right {
+  display: flex; flex-direction: column; gap: 14px; align-items: stretch;
+  background: rgba(0,0,0,0.32);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 5px;
+  padding: 16px 18px;
+  backdrop-filter: blur(8px);
+  align-self: start;
+}
+.hero-scorebox { text-align: center; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.hero-acc { font-family: var(--font-mono); font-size: 34px; font-weight: 500; color: white; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.hero-acc-sub { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: rgba(255,255,255,0.55); margin-top: 4px; }
+.hero-hits { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.hero-hits > div { display: flex; flex-direction: column; align-items: center; padding: 6px 0; font-family: var(--font-mono); }
+.hero-hits .k { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
+.hero-hits .k.great { color: var(--great); }
+.hero-hits .k.ok    { color: var(--ok); }
+.hero-hits .k.miss  { color: var(--miss); }
+.hero-hits .v { font-size: 18px; color: white; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.hero-mapinfo { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); }
+.hero-mapinfo > div { display: flex; flex-direction: column; align-items: center; font-family: var(--font-mono); }
+.hero-mapinfo .k { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(255,255,255,0.48); }
+.hero-mapinfo .v { font-size: 13px; color: white; font-variant-numeric: tabular-nums; margin-top: 2px; }
 .row-link { display: inline-block; padding: 2px 6px; margin: 0 2px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; background: var(--panel); color: var(--ink-muted); border: 1px solid var(--rule); border-radius: 3px; text-decoration: none; }
 .row-link:hover { color: var(--accent); border-color: var(--accent-soft); text-decoration: none; }
 .row-link-muted { display: inline-block; padding: 2px 6px; margin: 0 2px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); opacity: 0.4; }
@@ -522,6 +639,83 @@ h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 .scrub-handle::after { content: ''; position: absolute; top: 8px; bottom: 8px; left: 3px; width: 2px; background: rgba(255,255,255,0.6); }
 .scrub-labels { display: flex; justify-content: space-between; margin: 8px 60px 0 60px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
 """
+
+
+def _render_map_hero(row: dict, player: str) -> str:
+    """Big visual hero card for a replay's map: cover image + diff pill + title +
+    action buttons + play stats. Modeled loosely on the osu! beatmap page hero."""
+    setid = row.get("beatmapset_id")
+    bid = row.get("beatmap_id")
+    # osu.ppy.sh serves beatmap cover images at a predictable URL. Fall back to a
+    # solid color if the map has no beatmapset_id (unranked / local-only).
+    cover_bg = (
+        f'background-image: linear-gradient(180deg, rgba(15,17,20,0.35) 0%, rgba(15,17,20,0.92) 100%), url("https://assets.ppy.sh/beatmaps/{setid}/covers/cover@2x.jpg");'
+        if setid else
+        'background: linear-gradient(135deg, var(--accent-cool), var(--accent) 90%);'
+    )
+
+    # Stats row: reported vs judged accuracy, great/ok/miss, max_combo indicator.
+    misses = row.get("count_miss") or 0
+    oks = row.get("count_ok") or 0
+    combo_indicator = ""
+    if misses == 0 and oks == 0:
+        combo_indicator = '<span class="hero-fc ss">SS</span>'
+    elif misses == 0:
+        combo_indicator = '<span class="hero-fc fc">FC</span>'
+
+    # Map metadata compact row: BPM, notes, duration, OD.
+    dur_s = int(row.get("duration_s") or 0)
+    duration_str = f"{dur_s // 60}:{dur_s % 60:02d}"
+    bpm_min = row.get("bpm_min") or 0
+    bpm_max = row.get("bpm_max") or 0
+    bpm_str = f"{bpm_min:.0f}" if abs(bpm_min - bpm_max) < 0.5 else f"{bpm_min:.0f}–{bpm_max:.0f}"
+    hittable = row.get("hittable_notes") or 0
+    od = row.get("od") or 0
+
+    beatmap_btn = (
+        f'<a class="hero-btn primary" href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener">Beatmap page</a>'
+        if bid else ''
+    )
+    osr_btn = f'<a class="hero-btn" href="/replay/{player}/{row["id"]}/osr" download>Download .osr</a>'
+    inspector_btn = f'<a class="hero-btn" href="/replay/{player}/{row["id"]}/inspect">Open inspector</a>'
+
+    played = row["played_at"][:19].replace("T", " ")
+    return f"""
+  <section class="map-hero" style='{cover_bg}'>
+    <div class="hero-inner">
+      <div class="hero-left">
+        <div class="hero-pill-row">
+          <span class="diff-pill">{row['map_version']}</span>
+          {combo_indicator}
+        </div>
+        <h1 class="hero-title">{row['map_title']}</h1>
+        <p class="hero-artist">{row.get('map_artist', '')}</p>
+        <p class="hero-meta">mapped by <b>{row.get('map_creator','?')}</b>  ·  played {played}</p>
+        <div class="hero-actions">
+          {beatmap_btn}
+          {osr_btn}
+          {inspector_btn}
+        </div>
+      </div>
+      <div class="hero-right">
+        <div class="hero-scorebox">
+          <div class="hero-acc">{row['accuracy_judged']*100:.2f}%</div>
+          <div class="hero-acc-sub">judged accuracy  ·  reported {row['accuracy_reported']*100:.2f}%</div>
+        </div>
+        <div class="hero-hits">
+          <div><span class="k great">great</span><span class="v">{row['count_great']}</span></div>
+          <div><span class="k ok">ok</span><span class="v">{row['count_ok']}</span></div>
+          <div><span class="k miss">miss</span><span class="v">{row['count_miss']}</span></div>
+        </div>
+        <div class="hero-mapinfo">
+          <div><span class="k">BPM</span><span class="v">{bpm_str}</span></div>
+          <div><span class="k">length</span><span class="v">{duration_str}</span></div>
+          <div><span class="k">notes</span><span class="v">{hittable}</span></div>
+          <div><span class="k">OD</span><span class="v">{od:.1f}</span></div>
+        </div>
+      </div>
+    </div>
+  </section>"""
 
 
 def _render_upload_progress(task_id: str, entry: dict) -> str:
@@ -1306,29 +1500,16 @@ def _render_replay(row: dict, player: str, features=None) -> str:
     features_section = _render_features_panel(features) if features else ""
     header_badge = _fc_badge(row.get("count_miss", 1), row.get("count_ok", 1))
     warning_html = _render_discrepancy_warning(row)
-    bid = row.get("beatmap_id")
-    osu_link = (
-        f'  ·  <a href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener">osu! page →</a>'
-        if bid else ''
-    )
-    osr_link = f'  ·  <a href="/replay/{player}/{row["id"]}/osr" download>download .osr →</a>'
+    hero_section = _render_map_hero(row, player)
 
     body = f"""
-  <section>
+  <section class="eyebrow-row">
     <span class="eyebrow"><a href="/player/{player}" style="color: var(--ink-muted);">← {player}</a>  ·  replay #{row['id']}</span>
-    <h1>{header_badge}{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
-    <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}  ·  <a href="/replay/{player}/{row['id']}/inspect">open inspector →</a>{osu_link}{osr_link}</p>
   </section>
+
+  {hero_section}
 
   {warning_html}
-
-  <section class="stats-row">
-    <div class="stat"><span class="k">reported acc</span><span class="v">{row['accuracy_reported']*100:.2f}%</span></div>
-    <div class="stat"><span class="k">judged acc</span><span class="v">{row['accuracy_judged']*100:.2f}%</span></div>
-    <div class="stat"><span class="k">great</span><span class="v" style="color: var(--great);">{row['count_great']}</span></div>
-    <div class="stat"><span class="k">ok</span><span class="v" style="color: var(--ok);">{row['count_ok']}</span></div>
-    <div class="stat"><span class="k">miss</span><span class="v" style="color: var(--miss);">{row['count_miss']}</span></div>
-  </section>
 
   <section class="card">
     <h2>Map rating</h2>
