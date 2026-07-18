@@ -119,9 +119,22 @@ def _length_value(L: int) -> float:
 
 
 def _stream_color_avg(stream: Sequence[HitObject]) -> float:
-    """Per-note Alchyr color friction summed across the stream, averaged.
-    Tracks recent same-color mono lengths for same-polarity and repetition
-    decay per Alchyr's color signal."""
+    """Per-note Alchyr color friction summed across the stream, averaged, then
+    dampened by the SHARE of the stream inside short (1-3) mono runs.
+
+    Alchyr's formula was designed for overall taiko difficulty — for a full-alt
+    player long mono runs ARE harder to sustain, so his base_swap_bonus scales
+    UP with the outgoing run length. For KDDK it's the opposite: length-4+ runs
+    let each hand lock into one key (muscle memory rest), so those runs REDUCE
+    KDDK cognitive load. We dampen the accumulated friction by short_share²
+    so streams with even a small amount of long-mono rest score meaningfully
+    lower than streams that are 100% short-mixed.
+
+    Blue Army INNER ONI: 100% short runs across all its long streams → full
+    friction. Telepathy [Huh]: 78-85% short (some length-4/6 runs sprinkled)
+    → moderate dampening. The Fool: mostly length 5+ mono runs → heavy
+    dampening (also crushed by Alchyr's own repetition decay).
+    """
     if len(stream) < 2:
         return 0.0
     prev_kat_lens = [0, 0]
@@ -157,4 +170,29 @@ def _stream_color_avg(stream: Sequence[HitObject]) -> float:
         else:
             same_type_count += 1
         prev_is_kat = cur_is_kat
-    return total / len(stream)
+
+    per_note = total / len(stream)
+    # For LONG streams only (≥61 notes) dampen by short-share². Alchyr's formula
+    # treats long mono runs as harder to sustain (full-alt player perspective),
+    # but for KDDK long mono runs let each hand lock into one key = rest. In a
+    # long stream, ANY length-4+ mono run gives measurable rest; in a short
+    # burst (Ring My Bell's 25-note streams) the same is true but the burst
+    # is over before the rest matters. So this only fires on maps whose LONG
+    # streams have muscle-memory rest points (Telepathy [Huh]) and leaves short
+    # bursts (Ring My Bell) alone.
+    if len(stream) < _HOSTILE_MIN_LEN:
+        return per_note
+    runs: list[int] = []
+    color = stream[0].note_type.is_don
+    length = 1
+    for i in range(1, len(stream)):
+        if stream[i].note_type.is_don == color:
+            length += 1
+        else:
+            runs.append(length)
+            color = stream[i].note_type.is_don
+            length = 1
+    runs.append(length)
+    short_notes = sum(l for l in runs if l <= 3)
+    short_share = short_notes / len(stream)
+    return per_note * (short_share ** 2)

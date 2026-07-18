@@ -144,6 +144,15 @@ def _raw_technical(f: MapFeatures) -> float:
     q_specific = f.transitions.quarter_sixth_transitions + f.transitions.quarter_third_transitions
     q_n = _norm(q_specific, 5, 100)
 
+    # Gate tech_div_n by how well the hard divisors are INTEGRATED into 1/4
+    # streams (q_specific = # of 1/4-to-1/6 and 1/4-to-1/3 transitions). A map
+    # with 8% 1/6 divisors AND many transitions (Sonatina: 65) is genuinely
+    # rhythm-switching technical. Same 8% with only 1-2 transitions (Telepathy
+    # [Huh]) has isolated bursts — mash/speed content, not KDDK-technical.
+    # Ring My Bell at q=13 keeps ~70% because its 1/6s DO mix in with the 1/4s.
+    integration_gate = 0.3 + 0.7 * _norm(q_specific, 3, 20)
+    tech_div_n *= integration_gate
+
     trans_n = _norm_up(f.transitions.transitions_per_minute, 40, 250)
     # off_grid_ratio is a bounded 0..1 share, so it must SATURATE — otherwise
     # Kantan / Futsuu diffs (whose 2×/4×/etc-beat gaps our divisor detector
