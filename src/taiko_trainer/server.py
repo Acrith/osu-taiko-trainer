@@ -493,8 +493,8 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .target-cell { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .target-cell .target-acc { font-size: 9px; letter-spacing: 0.08em; color: var(--ink-faint); text-transform: uppercase; }
 .target-cell .target-gain-pos { font-size: 13px; color: var(--great); font-weight: 500; font-variant-numeric: tabular-nums; }
-.target-cell .target-gain-none { font-size: 13px; color: var(--ink-faint); }
-.target-empty { color: var(--ink-faint); font-size: 13px; }
+.target-cell-empty { }
+.target-ceiling { font-size: 11px; color: var(--ink-faint); font-style: italic; text-align: right; }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
 .forecast-row:last-child { border-bottom: none; }
 .forecast-header { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); border-bottom: 1px solid var(--rule); }
@@ -1839,16 +1839,16 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
         weight = _DECAY ** i
         return c.raw_rating * (tgt_scale - cur_scale) * weight
 
-    def _fmt_target_cell(c, i, target):
-        if target is None:
-            return '<span class="tr"><span class="target-empty">—</span></span>'
+    def _fmt_target_cell(target, gain):
+        if target is None or gain < 0.5:
+            return '<span class="tr target-cell-empty"></span>'
         acc_pct = "SS" if target >= 1.0 else f"{target*100:.2f}%".rstrip("0").rstrip(".")
-        gain = _potential_gain(c, i, target)
-        if gain < 0.5:
-            gain_html = '<span class="target-gain-none">—</span>'
-        else:
-            gain_html = f'<span class="target-gain-pos">+{gain:.0f}</span>'
-        return f'<span class="tr target-cell"><span class="target-acc">{acc_pct}</span>{gain_html}</span>'
+        return (
+            f'<span class="tr target-cell">'
+            f'<span class="target-acc">{acc_pct}</span>'
+            f'<span class="target-gain-pos">+{gain:.0f}</span>'
+            f'</span>'
+        )
 
     contribs_html = ""
     if contribs:
@@ -1864,15 +1864,29 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
         parts = []
         for i, c in enumerate(contribs):
             targets = _next_targets(c.accuracy)
-            padded = tuple(targets) + (None,) * (3 - len(targets))
+            # Compute (target, gain) pairs and drop the ones with no meaningful
+            # gain (rounds to 0 — happens above 99.5% where our _accuracy_scaling
+            # saturates). Pad the tail with (None, 0) so grid alignment holds.
+            paired = [(t, _potential_gain(c, i, t)) for t in targets]
+            useful = [(t, g) for t, g in paired if g >= 0.5]
+            while len(useful) < 3:
+                useful.append((None, 0.0))
+            ceiling_note = ""
+            if not any(g >= 0.5 for t, g in paired):
+                ceiling_note = (
+                    '<span class="tr target-ceiling" style="grid-column: span 3;">'
+                    'no meaningful gain — accuracy_scaling saturates above 99.5%'
+                    '</span>'
+                )
+                cells_html = ceiling_note
+            else:
+                cells_html = "".join(_fmt_target_cell(t, g) for t, g in useful)
             parts.append(
                 f'<div class="forecast-row">'
                 f'<span class="contrib-meta">#{i+1}</span>'
                 f'<a href="/replay/{player}/{c.replay_id}" class="contrib-map">{c.map_title} <span class="muted">[{c.map_diff}]</span><br><span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.2f}%</span></a>'
                 f'<span class="tr contrib-val">{c.weighted:.0f}</span>'
-                f'{_fmt_target_cell(c, i, padded[0])}'
-                f'{_fmt_target_cell(c, i, padded[1])}'
-                f'{_fmt_target_cell(c, i, padded[2])}'
+                f'{cells_html}'
                 f'</div>'
             )
         rows = "".join(parts)
