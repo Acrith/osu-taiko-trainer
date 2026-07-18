@@ -747,8 +747,12 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
         raw = history[-1].get("latest_replay_played_at", "")
         latest_date = raw[:10] if raw else ""
 
-    # A subtle background gradient — no cover image for players.
-    bg = "background: linear-gradient(135deg, var(--accent-cool) 0%, var(--accent) 100%);"
+    # Dark base with just a hint of warmth on the right — mirrors how the
+    # beatmap hero card reads (dimmed cover image) instead of a loud gradient.
+    bg = ("background: "
+          "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
+          "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
+          "#16181D;")
 
     return f"""
   <section class="map-hero" style='{bg}'>
