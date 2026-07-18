@@ -237,8 +237,26 @@ def create_app(workspace: str) -> FastAPI:
 
     # --- upload ---------------------------------------------------------
 
+    @app.get("/api/uploads/active")
+    def uploads_active():
+        """List uploads that are still in progress or recently completed.
+        The base template polls this to render the floating status tray."""
+        cutoff = time.time() - 15  # keep done/error entries visible 15s
+        summary = []
+        with _UPLOAD_LOCK:
+            for tid, entry in list(_UPLOAD_TASKS.items()):
+                if entry["stage"] not in ("done", "error"):
+                    summary.append({"id": tid, **entry})
+                elif entry.get("updated_at", 0) >= cutoff:
+                    summary.append({"id": tid, **entry})
+            # Cleanup: drop entries older than 5 minutes.
+            gc_cutoff = time.time() - 300
+            for tid in [t for t, e in _UPLOAD_TASKS.items() if e.get("updated_at", 0) < gc_cutoff]:
+                _UPLOAD_TASKS.pop(tid, None)
+        return JSONResponse(summary)
+
     @app.post("/upload")
-    async def upload(file: UploadFile = File(...), map_file: UploadFile | None = File(None)):
+    async def upload(request: Request, file: UploadFile = File(...), map_file: UploadFile | None = File(None)):
         # Save uploaded files to a persistent temp dir so the background thread can read them.
         # We clean it up in the worker.
         td = Path(tempfile.mkdtemp(prefix="tt-upload-"))
@@ -290,7 +308,10 @@ def create_app(workspace: str) -> FastAPI:
                 shutil.rmtree(td, ignore_errors=True)
 
         threading.Thread(target=_worker, daemon=True).start()
-        return RedirectResponse(url=f"/upload/{task_id}", status_code=303)
+        # Redirect back to where the user came from; the floating tray in the
+        # base template shows progress from any page.
+        back = request.headers.get("referer") or "/"
+        return RedirectResponse(url=back, status_code=303)
 
     @app.get("/upload/{task_id}", response_class=HTMLResponse)
     def upload_page(task_id: str):
@@ -568,6 +589,26 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .row-link-muted { display: inline-block; padding: 2px 6px; margin: 0 2px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); opacity: 0.4; }
 td.links { text-align: right; white-space: nowrap; }
 th.links-col { text-align: right; }
+/* floating upload tray (bottom-right) */
+#uploads-tray { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column-reverse; gap: 10px; z-index: 999; pointer-events: none; }
+.upload-toast { pointer-events: auto; width: 320px; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.35); font-family: var(--font-mono); animation: ut-in 0.25s ease-out; }
+.upload-toast.leaving { opacity: 0; transform: translateX(20px); transition: opacity 0.5s, transform 0.5s; }
+.upload-toast[data-stage="done"] { border-color: var(--great); }
+.upload-toast[data-stage="error"] { border-color: var(--miss); }
+.ut-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.ut-label { font-size: 12px; color: var(--ink); font-weight: 500; }
+.upload-toast[data-stage="done"] .ut-label { color: var(--great); }
+.upload-toast[data-stage="error"] .ut-label { color: var(--miss); }
+.ut-close { background: none; border: none; color: var(--ink-faint); font-size: 16px; cursor: pointer; line-height: 1; padding: 0 4px; }
+.ut-close:hover { color: var(--ink); }
+.ut-bar { height: 4px; background: var(--rule); border-radius: 2px; overflow: hidden; }
+.ut-fill { height: 100%; background: linear-gradient(90deg, var(--accent-cool), var(--accent)); transition: width 0.3s; }
+.upload-toast[data-stage="done"] .ut-fill { background: var(--great); }
+.upload-toast[data-stage="error"] .ut-fill { background: var(--miss); }
+.ut-note { font-size: 10px; color: var(--ink-muted); margin-top: 6px; overflow-wrap: anywhere; }
+.ut-note a { color: var(--accent); }
+.ut-filename { font-size: 10px; color: var(--ink-faint); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes ut-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 .upload-status { display: flex; flex-direction: column; gap: 10px; }
 .upload-label { font-family: var(--font-mono); font-size: 14px; color: var(--ink); font-weight: 500; }
 .upload-bar { height: 10px; background: var(--rule); border-radius: 5px; overflow: hidden; }
@@ -847,6 +888,82 @@ def _html_page(title: str, body: str, active: str = "") -> str:
   </header>
   {body}
 </main>
+
+<div id="uploads-tray" aria-live="polite"></div>
+<script>
+(function() {{
+  // Polls /api/uploads/active on every page; renders one card per in-flight
+  // or recently-completed upload in the bottom-right corner. Uploads survive
+  // page navigation because the server keeps them in a shared dict.
+  const tray = document.getElementById('uploads-tray');
+  if (!tray) return;
+  const state = new Map();  // id -> {{el, doneAt}}
+
+  function make(id) {{
+    const el = document.createElement('div');
+    el.className = 'upload-toast';
+    el.innerHTML = `
+      <div class="ut-header">
+        <span class="ut-label"></span>
+        <button class="ut-close" title="dismiss">×</button>
+      </div>
+      <div class="ut-bar"><div class="ut-fill"></div></div>
+      <div class="ut-note"></div>
+      <div class="ut-filename"></div>`;
+    tray.appendChild(el);
+    el.querySelector('.ut-close').addEventListener('click', () => {{ el.remove(); state.delete(id); }});
+    return el;
+  }}
+
+  async function poll() {{
+    let list;
+    try {{
+      const r = await fetch('/api/uploads/active');
+      if (!r.ok) throw new Error('http ' + r.status);
+      list = await r.json();
+    }} catch(e) {{
+      setTimeout(poll, 3000);
+      return;
+    }}
+    const seen = new Set();
+    for (const s of list) {{
+      seen.add(s.id);
+      let entry = state.get(s.id);
+      if (!entry) {{
+        entry = {{ el: make(s.id), doneAt: 0 }};
+        state.set(s.id, entry);
+      }}
+      entry.el.dataset.stage = s.stage;
+      entry.el.querySelector('.ut-label').textContent = s.label || s.stage || '';
+      entry.el.querySelector('.ut-fill').style.width = (s.pct || 0) + '%';
+      entry.el.querySelector('.ut-note').textContent = s.note || '';
+      entry.el.querySelector('.ut-filename').textContent = s.filename || '';
+      if (s.stage === 'error') {{
+        entry.el.querySelector('.ut-note').textContent = s.error || 'failed';
+      }} else if (s.stage === 'done' && !entry.doneAt) {{
+        entry.doneAt = Date.now();
+        if (s.redirect) {{
+          const note = entry.el.querySelector('.ut-note');
+          note.innerHTML = '';
+          const a = document.createElement('a');
+          a.href = s.redirect;
+          a.textContent = 'view report →';
+          note.appendChild(a);
+        }}
+      }}
+    }}
+    // Fade + drop toasts whose task disappeared server-side.
+    for (const [id, entry] of state) {{
+      if (!seen.has(id)) {{
+        entry.el.classList.add('leaving');
+        setTimeout(() => {{ entry.el.remove(); state.delete(id); }}, 500);
+      }}
+    }}
+    setTimeout(poll, 800);
+  }}
+  poll();
+}})();
+</script>
 </body></html>"""
 
 
