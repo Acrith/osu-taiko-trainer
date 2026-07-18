@@ -44,7 +44,7 @@ from .features import extract_features
 from .judgment import Verdict, judge_replay
 from .osr_parser import parse_osr_file
 from .player import PlayerSkill
-from .report import build_report
+from .report import _compute_dim_contributors, build_report
 from .sessions import group_sessions
 from .suggest import suggest_maps
 from .workflow import _parse_bytes_as_osu, add_replay
@@ -147,8 +147,12 @@ def create_app(workspace: str) -> FastAPI:
         suggestions = suggest_maps(
             conn, report.skill, dim, top_n=25, exclude_md5s=played_md5s,
         )
+        # Full contributor list for THIS dim on this dedicated page — the player
+        # report shows top 5, but here we want to see the tail too (users may
+        # have hundreds of plays).
+        full_contribs = _compute_dim_contributors(replays, top_n=100).get(dim, ())
         conn.close()
-        return _render_train_page(name, dim, report.skill, suggestions, report.dim_contributors.get(dim, ()))
+        return _render_train_page(name, dim, report.skill, suggestions, full_contribs)
 
     @app.get("/replay/{player}/{replay_id}/inspect", response_class=HTMLResponse)
     def replay_inspect(player: str, replay_id: int):
@@ -481,6 +485,10 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .replay-tabs .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
 .replay-search { font-family: var(--font-mono); font-size: 12px; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 3px; background: var(--ground); color: var(--ink); flex: 1; min-width: 180px; max-width: 280px; }
 .replay-search:focus { outline: none; border-color: var(--accent); }
+.forecast-scroll { max-height: 640px; overflow-y: auto; padding-right: 6px; }
+.forecast-scroll::-webkit-scrollbar { width: 8px; }
+.forecast-scroll::-webkit-scrollbar-track { background: var(--panel); }
+.forecast-scroll::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 4px; }
 .forecast-grid { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
 .forecast-row:last-child { border-bottom: none; }
@@ -1830,8 +1838,8 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
             f'<div class="forecast-row forecast-header">'
             f'<span></span><span>map</span>'
             f'<span class="tr">current</span>'
+            f'<span class="tr">at 98%</span>'
             f'<span class="tr">at 99%</span>'
-            f'<span class="tr">at 99.5%</span>'
             f'<span class="tr">SS</span>'
             f'</div>'
         )
@@ -1840,16 +1848,18 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
             f'<span class="contrib-meta">#{i+1}</span>'
             f'<a href="/replay/{player}/{c.replay_id}" class="contrib-map">{c.map_title} <span class="muted">[{c.map_diff}]</span><br><span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.1f}%</span></a>'
             f'<span class="tr contrib-val">{c.weighted:.0f}</span>'
+            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 0.98))}</span>'
             f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 0.99))}</span>'
-            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 0.995))}</span>'
             f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 1.00))}</span>'
             f'</div>'
             for i, c in enumerate(contribs)
         )
+        n_shown = len(contribs)
         contribs_html = (
             f'<section class="card"><h2>What drove your {dim} = {val:.0f}</h2>'
-            f'<p class="hint">weighted top-K aggregation from your play history. Right columns show the potential gain if you improved that specific play.</p>'
-            f'<div class="forecast-grid">{header}{rows}</div>'
+            f'<p class="hint">weighted top-K aggregation from your play history ({n_shown} contributors). '
+            f'Right columns show the potential gain per play — grind the ones with the biggest deltas.</p>'
+            f'<div class="forecast-scroll"><div class="forecast-grid">{header}{rows}</div></div>'
             f'</section>'
         )
 
@@ -1882,8 +1892,8 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
   {contribs_html}
 
   <section class="card">
-    <h2>Maps to grow {dim}</h2>
-    <p class="hint">ranked by growth-vs-overwhelm score for your current profile</p>
+    <h2>New maps to try for {dim}</h2>
+    <p class="hint">picked from maps in your catalog you HAVEN'T played yet. Ranked by "will it grow your {dim}?" (higher rating than yours) minus "will it overwhelm you?" (much harder than your profile in the OTHER dims). Empty list usually means your catalog is thin — upload more replays or (future) enable the osu! API map fetcher.</p>
     {sugg_html}
   </section>
 """
