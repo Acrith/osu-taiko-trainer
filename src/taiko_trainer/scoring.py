@@ -145,7 +145,12 @@ def _raw_technical(f: MapFeatures) -> float:
     q_n = _norm(q_specific, 5, 100)
 
     trans_n = _norm_up(f.transitions.transitions_per_minute, 40, 250)
-    offgrid_n = _norm_up(f.rhythm.off_grid_ratio, 0.0, 0.04)
+    # off_grid_ratio is a bounded 0..1 share, so it must SATURATE — otherwise
+    # Kantan / Futsuu diffs (whose 2×/4×/etc-beat gaps our divisor detector
+    # can only bucket as "other") blow up the technical rating. Anchor set
+    # loose enough that a real 1/6-1/4 mixing map (Sonatina ~0.8%) still
+    # scores meaningfully.
+    offgrid_n = _norm(f.rhythm.off_grid_ratio, 0.0, 0.04)
     # Moderate-BPM boost — technical maps are rarely 250 BPM speed monsters.
     low_bpm_boost = _norm(220 - f.movement.bpm_max, 30, 90)
 
