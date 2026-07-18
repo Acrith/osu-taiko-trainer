@@ -470,6 +470,27 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
 .eyebrow-row { margin-bottom: -20px; }
+
+/* --- skill radar --- */
+.radar-wrap { display: flex; justify-content: center; padding: 8px 0 12px; }
+.radar { width: 100%; max-width: 500px; height: auto; }
+.radar-grid { fill: none; stroke: var(--rule); stroke-width: 1; opacity: 0.55; }
+.radar-axis { stroke: var(--rule); stroke-width: 1; opacity: 0.8; }
+.radar-skill { fill: var(--accent); fill-opacity: 0.22; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.radar-vertex { fill: var(--accent); stroke: var(--panel); stroke-width: 2; cursor: pointer; }
+.radar-vertex.weakest { fill: var(--miss); }
+.radar-label { font-family: var(--font-mono); font-size: 11px; cursor: pointer; }
+.radar-label .dim-name { fill: var(--ink-muted); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; }
+.radar-label .dim-name.weakest { fill: var(--miss); }
+.radar-label .dim-val { fill: var(--ink); font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.radar-label .radar-delta { font-size: 10px; letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
+.radar-label .radar-delta.up { fill: var(--great); }
+.radar-label .radar-delta.down { fill: var(--miss); }
+.radar a:hover .radar-vertex { r: 8; }
+.radar a:hover .dim-name { fill: var(--accent); }
+
+/* --- player hero style desc chip --- */
+.hero-style-desc { font-family: var(--font-mono); font-size: 11px; color: rgba(255,255,255,0.7); letter-spacing: 0.04em; }
 .map-hero {
   position: relative;
   min-height: 260px;
@@ -695,6 +716,172 @@ h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 .scrub-handle::after { content: ''; position: absolute; top: 8px; bottom: 8px; left: 3px; width: 2px; background: rgba(255,255,255,0.6); }
 .scrub-labels { display: flex; justify-content: space-between; margin: 8px 60px 0 60px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
 """
+
+
+_STYLE_BADGE = {
+    "kddk": ("KDDK", "outer=kat, inner=don, L-R alternation"),
+    "ddkk": ("DDKK", "L=don, R=kat (color-per-hand)"),
+    "kkdd": ("KKDD", "L=kat, R=don (color-per-hand)"),
+    "unknown": ("STYLE?", "playstyle not set"),
+}
+
+def _render_player_hero(report, replays: list[dict], player: str) -> str:
+    """Player-profile hero card, mirrors the beatmap hero layout."""
+    d = report.skill.as_dict()
+    total_skill = sum(d.values())
+    dominant = max(d.items(), key=lambda kv: kv[1])[0]
+
+    # Aggregates
+    unique_maps = len({r.get("map_md5") for r in replays})
+    fc_count = sum(1 for r in replays if (r.get("count_miss") or 0) == 0)
+    ss_count = sum(1 for r in replays
+                    if (r.get("count_miss") or 0) == 0 and (r.get("count_ok") or 0) == 0)
+    sess_count = len(getattr(report, "snapshot_history", ()) or ())
+
+    style_short, style_desc = _STYLE_BADGE.get(report.style, (report.style.upper(), ""))
+
+    # Latest session date (from snapshot_history — sorted oldest→newest)
+    history = getattr(report, "snapshot_history", ()) or ()
+    latest_date = ""
+    if history:
+        raw = history[-1].get("latest_replay_played_at", "")
+        latest_date = raw[:10] if raw else ""
+
+    # A subtle background gradient — no cover image for players.
+    bg = "background: linear-gradient(135deg, var(--accent-cool) 0%, var(--accent) 100%);"
+
+    return f"""
+  <section class="map-hero" style='{bg}'>
+    <div class="hero-inner">
+      <div class="hero-left">
+        <div class="hero-pill-row">
+          <span class="diff-pill">{style_short}</span>
+          <span class="hero-style-desc">{style_desc}</span>
+        </div>
+        <h1 class="hero-title">{player}</h1>
+        <p class="hero-artist">training profile</p>
+        <p class="hero-meta">{report.replays} replays  ·  {sess_count} sessions  ·  {unique_maps} unique maps{("  ·  latest " + latest_date) if latest_date else ""}</p>
+        <div class="hero-actions">
+          <a class="hero-btn primary" href="/player/{player}/train/{report.weakest_dim}">Push {report.weakest_dim} →</a>
+          <a class="hero-btn" href="/">Home</a>
+        </div>
+      </div>
+      <div class="hero-right">
+        <div class="hero-scorebox">
+          <div class="hero-acc">{total_skill:.0f}</div>
+          <div class="hero-acc-sub">total skill  ·  dominant: {dominant}</div>
+        </div>
+        <div class="hero-hits">
+          <div><span class="k great">FC</span><span class="v">{fc_count}</span></div>
+          <div><span class="k ok">SS</span><span class="v">{ss_count}</span></div>
+          <div><span class="k miss">misses</span><span class="v">{report.total_misses}</span></div>
+        </div>
+        <div class="hero-mapinfo">
+          <div><span class="k">speed</span><span class="v">{d['speed']:.0f}</span></div>
+          <div><span class="k">stam</span><span class="v">{d['stamina']:.0f}</span></div>
+          <div><span class="k">gim</span><span class="v">{d['gimmick']:.0f}</span></div>
+          <div><span class="k">tech</span><span class="v">{d['technical']:.0f}</span></div>
+          <div><span class="k">cons</span><span class="v">{d['consistency']:.0f}</span></div>
+        </div>
+      </div>
+    </div>
+  </section>"""
+
+
+def _render_skill_radar(report, player: str) -> str:
+    """SVG radar chart of the 5-D skill vector. Values normalized to the map's
+    max dimension so shape (relative disparity) reads clearly. Each vertex is
+    a click-through to /player/{name}/train/{dim}."""
+    import math as _math
+
+    dims = ("speed", "stamina", "gimmick", "technical", "consistency")
+    d = report.skill.as_dict()
+    max_val = max(d.values()) or 1
+
+    W, H = 460, 380
+    cx, cy = W / 2, H / 2 - 10
+    r_max = 130
+
+    # 5 axes at 72° intervals, SPEED at top
+    angles = {dim: -_math.pi/2 + i * (2*_math.pi/5) for i, dim in enumerate(dims)}
+
+    def pt(dim, r):
+        a = angles[dim]
+        return (cx + r * _math.cos(a), cy + r * _math.sin(a))
+
+    # Grid rings at 25/50/75/100% of r_max
+    rings_svg = ""
+    for pct in (0.25, 0.5, 0.75, 1.0):
+        r = r_max * pct
+        pts = " ".join(f"{pt(dim, r)[0]:.1f},{pt(dim, r)[1]:.1f}" for dim in dims)
+        rings_svg += f'<polygon class="radar-grid" points="{pts}"/>'
+
+    # Axis lines from center to outer ring
+    axes_svg = ""
+    for dim in dims:
+        ex, ey = pt(dim, r_max)
+        axes_svg += f'<line class="radar-axis" x1="{cx:.1f}" y1="{cy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}"/>'
+
+    # Skill polygon: fill filled at value / max_val
+    skill_pts = []
+    for dim in dims:
+        val = d[dim]
+        r = r_max * min(1.0, val / max_val)
+        x, y = pt(dim, r)
+        skill_pts.append(f"{x:.1f},{y:.1f}")
+    skill_poly = f'<polygon class="radar-skill" points="{" ".join(skill_pts)}"/>'
+
+    # Vertices + external labels, each wrapped in a clickable link
+    vertices_svg = ""
+    delta_map = report.skill_delta or {}
+    for dim in dims:
+        val = d[dim]
+        pct = min(1.0, val / max_val)
+        vx, vy = pt(dim, r_max * pct)
+        is_weakest = dim == report.weakest_dim
+        # Label position — just outside the outer ring
+        lr = r_max + 42
+        lx, ly = pt(dim, lr)
+        # Text-anchor depending on angle
+        a = angles[dim]
+        ax = _math.cos(a)
+        if abs(ax) < 0.2:
+            anchor = "middle"
+        elif ax > 0:
+            anchor = "start"
+        else:
+            anchor = "end"
+        # Delta arrow
+        delta_svg = ""
+        if delta_map:
+            delta = delta_map.get(dim, 0)
+            if abs(delta) >= 0.5:
+                cls = "up" if delta > 0 else "down"
+                sign = "↑" if delta > 0 else "↓"
+                delta_svg = f'<tspan class="radar-delta {cls}" dy="15" x="{lx:.1f}">{sign}{delta:+.0f}</tspan>'
+        star = " ★" if is_weakest else ""
+        cls_extra = " weakest" if is_weakest else ""
+        vertices_svg += (
+            f'<a href="/player/{player}/train/{dim}">'
+            f'<circle class="radar-vertex{cls_extra}" cx="{vx:.1f}" cy="{vy:.1f}" r="6"/>'
+            f'<text class="radar-label" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">'
+            f'<tspan class="dim-name{cls_extra}">{dim}{star}</tspan>'
+            f'<tspan class="dim-val" x="{lx:.1f}" dy="16">{val:.0f}</tspan>'
+            f'{delta_svg}'
+            f'</text>'
+            f'</a>'
+        )
+
+    return f"""
+    <div class="radar-wrap">
+      <svg viewBox="0 0 {W} {H}" class="radar" preserveAspectRatio="xMidYMid meet">
+        {rings_svg}
+        {axes_svg}
+        {skill_poly}
+        {vertices_svg}
+      </svg>
+    </div>
+    """
 
 
 def _render_map_hero(row: dict, player: str) -> str:
@@ -1175,19 +1362,21 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
             suggestions_html = "<p class='hint'>No maps in DB with growth potential for this dimension. Add more via drop-zone.</p>"
 
     body = f"""
-  <section>
-    <span class="eyebrow">training report</span>
-    <h1>{report.player}</h1>
-    <p class="hint">{report.replays} replays  ·  {report.total_misses} total misses  ·  playstyle: {report.style}</p>
-  </section>
+  {_render_player_hero(report, replays or [], player_name or report.player)}
 
   <section class="card">
     <h2>Skill vector</h2>
-    <p class="hint">weakest dimension is your training target</p>
-    {dim_bars}
+    <p class="hint">click any dimension to see maps that push it  ·  ★ = weakest = training target</p>
+    {_render_skill_radar(report, player_name or report.player)}
   </section>
 
   {_render_progression_chart(getattr(report, "snapshot_history", ()))}
+
+  <section class="card">
+    <h2>What drove each dimension</h2>
+    <p class="hint">top-3 replays per dim, weighted top-K aggregation</p>
+    {dim_bars}
+  </section>
 
   {sess_html}
 
