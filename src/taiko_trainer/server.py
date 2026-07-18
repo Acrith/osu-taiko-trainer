@@ -496,9 +496,9 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .target-cell .target-gain-pos { font-size: 13px; color: var(--great); font-weight: 400; font-variant-numeric: tabular-nums; }
 .target-cell .target-gain-ss { font-size: 13px; color: #d4af37; font-weight: 700; font-variant-numeric: tabular-nums; text-shadow: 0 0 6px rgba(212, 175, 55, 0.35); }
 .target-cell-empty { }
-.target-ceiling { font-size: 11px; color: var(--ink-faint); font-style: italic; text-align: center; }
+.forecast-row .target-ceiling { font-size: 12px; color: var(--great); font-style: italic; text-align: center; }
 .forecast-header { position: sticky; top: 0; background: var(--panel); z-index: 2; }
-.forecast-improved-hdr { text-align: center; }
+.forecast-row .forecast-improved-hdr { text-align: center; }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
 .forecast-row:last-child { border-bottom: none; }
 .forecast-header { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); border-bottom: 1px solid var(--rule); }
@@ -1878,9 +1878,9 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
                 useful.append((None, 0.0))
             if not any(g >= 0.5 for t, g in paired):
                 if c.accuracy >= 0.9999:
-                    note = "already SS"
+                    note = 'already <span class="target-gain-ss">SS</span>'
                 else:
-                    note = "SS gain rounds to 0 at this rank"
+                    note = '<span class="target-gain-ss">SS</span> gain rounds to 0 at this rank'
                 cells_html = (
                     f'<span class="tr target-ceiling" style="grid-column: span 3;">'
                     f'{note}'
