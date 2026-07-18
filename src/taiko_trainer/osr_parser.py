@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import lzma
+import struct
 from pathlib import Path
 
 from osrparse import GameMode, KeyTaiko, Replay
@@ -34,13 +36,65 @@ def parse_osr_file(path: str | Path) -> TaikoReplay:
         game_version=replay.game_version,
     )
 
-    frames = _build_frames(replay.replay_data)
+    # osrparse silently strips the initial `y=-500` setup frames. In most replays
+    # their combined delta is ~0, so this is invisible. But some replays encode a
+    # real audio-lead-in delta (e.g. +8590 ms) in one of those setup frames, and
+    # stripping it makes every subsequent event's cumulative time 8590 ms early
+    # relative to the game's actual play time. Re-read the raw LZMA to detect
+    # that offset and pre-load it into cumulative time.
+    initial_offset_ms = _detect_stripped_setup_offset(path)
+    frames = _build_frames(replay.replay_data, initial_offset_ms=initial_offset_ms)
     return TaikoReplay(meta=meta, frames=frames)
 
 
-def _build_frames(events) -> tuple[ReplayFrame, ...]:
+def _detect_stripped_setup_offset(path: Path) -> int:
+    """Read the raw replay LZMA and return the sum of any leading y=-500 setup
+    frames' time deltas that osrparse dropped. In well-formed replays this is 0.
+    Returns 0 on any parse failure — worst case is current behavior.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 0
+    # Locate the LZMA block. The .osr layout has variable-length prefix strings,
+    # so we search for the LZMA properties byte (0x5D) preceded by a plausible
+    # 4-byte length. This is heuristic but stable for real replays.
+    for off in range(1, len(data) - 20):
+        if data[off + 4] == 0x5D and data[off + 5] == 0x00 and data[off + 6] == 0x00:
+            try:
+                lz_len = struct.unpack_from("<I", data, off)[0]
+                if not (1000 < lz_len < len(data)):
+                    continue
+                lz = data[off + 4 : off + 4 + lz_len]
+                dec = lzma.decompress(lz, format=lzma.FORMAT_ALONE).decode(errors="ignore")
+                break
+            except Exception:
+                continue
+    else:
+        return 0
+
+    events = [e for e in dec.split(",") if "|" in e]
+    total_stripped_delta = 0
+    for ev in events:
+        parts = ev.split("|")
+        if len(parts) < 4:
+            continue
+        try:
+            delta = int(parts[0])
+            y = int(parts[2])
+        except ValueError:
+            continue
+        # Stop as soon as we hit a real frame. The setup-frame convention is
+        # y = -500 (and specifically for the initial two-frame block).
+        if y != -500:
+            break
+        total_stripped_delta += delta
+    return total_stripped_delta
+
+
+def _build_frames(events, initial_offset_ms: int = 0) -> tuple[ReplayFrame, ...]:
     frames: list[ReplayFrame] = []
-    current_time = 0
+    current_time = initial_offset_ms
     previous_held = TaikoInput(0)
     for event in events:
         # -12345 marks the RNG-seed sentinel frame — skip it. Other negative
