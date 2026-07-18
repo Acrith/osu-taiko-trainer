@@ -70,6 +70,7 @@ def _resolve_map(
     target_md5: str,
     explicit_map_path: str | None,
     search_roots: list[str],
+    progress_cb=None,
 ) -> tuple[bytes | None, TaikoBeatmap | None]:
     """Try to obtain the map bytes for target_md5 from local sources.
 
@@ -79,15 +80,20 @@ def _resolve_map(
       3. Any registered map root (recursive glob)
       4. TODO: osu! API — see memory/project_osu_api_integration.md
     """
+    def _report(stage, total=None, done=None, note=""):
+        if progress_cb: progress_cb(stage=stage, total=total, done=done, note=note)
+
     catalog = open_catalog(workspace)
     existing = get_map(catalog, target_md5)
     if existing:
+        _report("catalog_hit", note="already have this map cached")
         content = db_module.get_map_content(catalog, target_md5)
         catalog.close()
         if content:
             return content, _parse_bytes_as_osu(content)
 
     if explicit_map_path:
+        _report("explicit_map", note=f"checking {Path(explicit_map_path).name}")
         p = Path(explicit_map_path)
         if p.exists():
             content = p.read_bytes()
@@ -101,12 +107,19 @@ def _resolve_map(
         root_p = Path(root)
         if not root_p.exists():
             continue
-        for cand in root_p.rglob("*.osu"):
+        _report("search_scan", note=f"enumerating {root_p.name}...")
+        candidates = list(root_p.rglob("*.osu"))
+        n = len(candidates)
+        for i, cand in enumerate(candidates):
+            if i % 100 == 0 or i == n - 1:
+                _report("search_hash", total=n, done=i,
+                        note=f"searching {root_p.name}")
             try:
                 content = cand.read_bytes()
             except OSError:
                 continue
             if hashlib.md5(content).hexdigest() == target_md5:
+                _report("search_hit", total=n, done=i, note=cand.name)
                 catalog.close()
                 return content, _parse_bytes_as_osu(content)
 
@@ -118,12 +131,21 @@ def add_replay(
     workspace: str | Path,
     replay_path: str,
     map_path: str | None = None,
+    progress_cb=None,
 ) -> AddResult:
-    """Ingest one replay: resolve map, store both file blobs, snapshot player skill."""
+    """Ingest one replay: resolve map, store both file blobs, snapshot player skill.
+
+    progress_cb (optional): called with keyword-args {stage, total, done, note}
+    at each pipeline step so a caller (webapp) can render a progress bar.
+    """
+    def _report(stage, total=None, done=None, note=""):
+        if progress_cb: progress_cb(stage=stage, total=total, done=done, note=note)
+
     replay_p = Path(replay_path)
     if not replay_p.exists():
         return AddResult(False, f"replay not found: {replay_path}")
 
+    _report("parse_replay", note=replay_p.name)
     replay_content = replay_p.read_bytes()
     rp = parse_osr_file(replay_p)
     target_md5 = rp.meta.beatmap_md5.lower()
@@ -134,7 +156,8 @@ def add_replay(
     roots = list_map_roots(plays)
     plays.close()
 
-    map_content, bm = _resolve_map(workspace, target_md5, map_path, roots)
+    _report("resolve_map", note=f"looking up map md5 {target_md5[:8]}...")
+    map_content, bm = _resolve_map(workspace, target_md5, map_path, roots, progress_cb=progress_cb)
     if bm is None or map_content is None:
         msg = [
             f"could not resolve map with md5 {target_md5}",
@@ -145,6 +168,7 @@ def add_replay(
         ]
         return AddResult(False, "\n".join(msg))
 
+    _report("rate_map", note="computing map features + rating")
     features = extract_features(bm)
     rating = rate_map(features)
 
@@ -152,11 +176,14 @@ def add_replay(
     plays = open_plays(workspace, player)  # this ATTACHes catalog
     upsert_map(plays, bm, features, rating, map_content)
 
+    _report("judge", note="running per-note judgment")
     judged = judge_replay(bm, rp)
+    _report("classify", note=f"classifying {judged.count_miss} misses")
     classifications = classify_failures(judged, bm, features)
     summary = summarize_failures(classifications)
     cheese = detect_cheese(judged)
 
+    _report("store", note="writing to database")
     replay_id = insert_replay(
         plays, rp, judged, target_md5, replay_content,
         classification=summary,
@@ -185,6 +212,7 @@ def add_replay(
         )
         for r in prows
     ]
+    _report("snapshot", note="recomputing player skill vector")
     skill = compute_player_skill(perfs)
     snapshot_player_skill(
         plays, skill,
@@ -192,6 +220,7 @@ def add_replay(
         latest_replay_played_at=rp.meta.timestamp.isoformat(),
     )
     plays.close()
+    _report("done", note=f"replay #{replay_id} added")
 
     return AddResult(
         ok=True,

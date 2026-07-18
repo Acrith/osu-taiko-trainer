@@ -18,6 +18,9 @@ from __future__ import annotations
 import io
 import shutil
 import tempfile
+import threading
+import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -45,6 +48,50 @@ from .report import build_report
 from .sessions import group_sessions
 from .suggest import suggest_maps
 from .workflow import _parse_bytes_as_osu, add_replay
+
+
+_UPLOAD_TASKS: dict[str, dict] = {}
+_UPLOAD_LOCK = threading.Lock()
+_STAGE_LABELS = {
+    "queued":         ("Queued",               0),
+    "parse_replay":   ("Parsing replay file",  5),
+    "resolve_map":    ("Looking up map",       10),
+    "catalog_hit":    ("Found in cache",       35),
+    "explicit_map":   ("Verifying explicit map", 25),
+    "search_scan":    ("Enumerating map roots", 15),
+    "search_hash":    ("Searching for map",    "dynamic"),   # 15..70 based on done/total
+    "search_hit":     ("Map found",            70),
+    "rate_map":       ("Computing map rating", 75),
+    "judge":          ("Judging per note",     80),
+    "classify":       ("Classifying misses",   90),
+    "store":          ("Writing to database",  95),
+    "snapshot":       ("Updating skill vector", 98),
+    "done":           ("Complete",             100),
+    "error":          ("Failed",               100),
+}
+
+
+def _compute_pct(stage, total, done):
+    label, pct = _STAGE_LABELS.get(stage, (stage, 50))
+    if pct == "dynamic" and total:
+        frac = done / total if total else 0
+        # search_hash ranges 15..70
+        return 15 + int(frac * 55)
+    return pct if isinstance(pct, int) else 50
+
+
+def _upload_progress_cb(task_id: str):
+    """Return a callback closure that updates the shared task-progress dict."""
+    def cb(stage, total=None, done=None, note=""):
+        label = _STAGE_LABELS.get(stage, (stage, 0))[0]
+        pct = _compute_pct(stage, total, done)
+        with _UPLOAD_LOCK:
+            _UPLOAD_TASKS[task_id].update({
+                "stage": stage, "label": label, "pct": pct,
+                "note": note, "total": total, "done": done,
+                "updated_at": time.time(),
+            })
+    return cb
 
 
 def create_app(workspace: str) -> FastAPI:
@@ -163,23 +210,74 @@ def create_app(workspace: str) -> FastAPI:
 
     @app.post("/upload")
     async def upload(file: UploadFile = File(...), map_file: UploadFile | None = File(None)):
-        with tempfile.TemporaryDirectory() as td:
-            tmp_dir = Path(td)
-            replay_path = tmp_dir / (file.filename or "upload.osr")
-            with open(replay_path, "wb") as fh:
-                shutil.copyfileobj(file.file, fh)
-            map_path = None
-            if map_file is not None and (map_file.filename or "").endswith(".osu"):
-                map_path = tmp_dir / (map_file.filename or "upload.osu")
-                with open(map_path, "wb") as fh:
-                    shutil.copyfileobj(map_file.file, fh)
-            result = add_replay(workspace, str(replay_path), map_path=str(map_path) if map_path else None)
-        if not result.ok:
-            return HTMLResponse(_render_upload_error(result.message), status_code=400)
-        target_player = result.player or ""
-        if target_player:
-            return RedirectResponse(url=f"/player/{target_player}", status_code=303)
-        return RedirectResponse(url="/", status_code=303)
+        # Save uploaded files to a persistent temp dir so the background thread can read them.
+        # We clean it up in the worker.
+        td = Path(tempfile.mkdtemp(prefix="tt-upload-"))
+        replay_path = td / (file.filename or "upload.osr")
+        with open(replay_path, "wb") as fh:
+            shutil.copyfileobj(file.file, fh)
+        map_path = None
+        if map_file is not None and (map_file.filename or "").endswith(".osu"):
+            map_path = td / (map_file.filename or "upload.osu")
+            with open(map_path, "wb") as fh:
+                shutil.copyfileobj(map_file.file, fh)
+
+        task_id = uuid.uuid4().hex[:10]
+        with _UPLOAD_LOCK:
+            _UPLOAD_TASKS[task_id] = {
+                "stage": "queued", "label": "Queued", "pct": 0, "note": "",
+                "filename": replay_path.name,
+                "created_at": time.time(), "updated_at": time.time(),
+                "result": None, "error": None,
+                "redirect": None,
+            }
+
+        def _worker():
+            try:
+                cb = _upload_progress_cb(task_id)
+                result = add_replay(
+                    workspace, str(replay_path),
+                    map_path=str(map_path) if map_path else None,
+                    progress_cb=cb,
+                )
+                with _UPLOAD_LOCK:
+                    entry = _UPLOAD_TASKS[task_id]
+                    if not result.ok:
+                        entry["stage"] = "error"
+                        entry["label"] = "Failed"
+                        entry["error"] = result.message
+                    else:
+                        entry["stage"] = "done"
+                        entry["label"] = "Complete"
+                        entry["pct"] = 100
+                        entry["result"] = result.message
+                        entry["redirect"] = f"/player/{result.player}" if result.player else "/"
+            except Exception as e:
+                with _UPLOAD_LOCK:
+                    _UPLOAD_TASKS[task_id]["stage"] = "error"
+                    _UPLOAD_TASKS[task_id]["label"] = "Failed"
+                    _UPLOAD_TASKS[task_id]["error"] = f"Internal error: {e!r}"
+            finally:
+                shutil.rmtree(td, ignore_errors=True)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return RedirectResponse(url=f"/upload/{task_id}", status_code=303)
+
+    @app.get("/upload/{task_id}", response_class=HTMLResponse)
+    def upload_page(task_id: str):
+        with _UPLOAD_LOCK:
+            entry = _UPLOAD_TASKS.get(task_id)
+        if not entry:
+            return HTMLResponse(_render_error(f"Upload task {task_id} not found."), status_code=404)
+        return _render_upload_progress(task_id, entry)
+
+    @app.get("/upload/{task_id}/status")
+    def upload_status(task_id: str):
+        with _UPLOAD_LOCK:
+            entry = _UPLOAD_TASKS.get(task_id)
+        if not entry:
+            return JSONResponse({"error": "unknown task"}, status_code=404)
+        return JSONResponse(entry)
 
     # --- simple settings endpoints ------------------------------------
 
@@ -321,6 +419,17 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-map .muted { color: var(--ink-faint); }
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
+.upload-status { display: flex; flex-direction: column; gap: 10px; }
+.upload-label { font-family: var(--font-mono); font-size: 14px; color: var(--ink); font-weight: 500; }
+.upload-bar { height: 10px; background: var(--rule); border-radius: 5px; overflow: hidden; }
+.upload-fill { height: 100%; background: linear-gradient(90deg, var(--accent-cool), var(--accent)); transition: width 0.3s ease-out; border-radius: 5px; }
+.upload-note { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.disc-warn { display: flex; gap: 12px; align-items: flex-start; padding: 14px 18px; border-radius: 4px; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; }
+.disc-warn .disc-icon { flex: 0 0 20px; height: 20px; text-align: center; line-height: 20px; border-radius: 50%; font-weight: 700; }
+.disc-warn.minor { background: rgba(176, 138, 43, 0.08); border: 1px solid var(--ok); color: var(--ink); }
+.disc-warn.minor .disc-icon { background: var(--ok); color: white; }
+.disc-warn.major { background: var(--accent-faint); border: 1px solid var(--accent-soft); color: var(--ink); }
+.disc-warn.major .disc-icon { background: var(--accent); color: white; }
 .fc-badge { display: inline-block; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; padding: 2px 6px; border-radius: 3px; vertical-align: middle; margin-right: 6px; font-weight: 600; }
 .fc-badge.fc { background: var(--great); color: white; }
 .fc-badge.ss { background: linear-gradient(90deg, #d4af37, #f1d475); color: #3a2a00; }
@@ -383,6 +492,93 @@ h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 .scrub-handle::after { content: ''; position: absolute; top: 8px; bottom: 8px; left: 3px; width: 2px; background: rgba(255,255,255,0.6); }
 .scrub-labels { display: flex; justify-content: space-between; margin: 8px 60px 0 60px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
 """
+
+
+def _render_upload_progress(task_id: str, entry: dict) -> str:
+    """Polling progress page. JS refreshes /status every 300ms and updates the bar."""
+    fname = entry.get("filename", "replay.osr")
+    body = f"""
+  <section>
+    <span class="eyebrow">upload</span>
+    <h1>Processing {fname}</h1>
+    <p class="hint">This can take a while if the map isn't already cached and the trainer has to search your Songs folder.</p>
+  </section>
+
+  <section class="card">
+    <div class="upload-status" id="upload-status">
+      <div class="upload-label" id="upload-label">Queued</div>
+      <div class="upload-bar"><div class="upload-fill" id="upload-fill" style="width: 0%"></div></div>
+      <div class="upload-note" id="upload-note"></div>
+    </div>
+    <div id="upload-error" class="error-banner" style="display:none; margin-top: 16px;"></div>
+    <div id="upload-result" class="hint" style="display:none; margin-top: 16px;"></div>
+  </section>
+
+  <script>
+    (function() {{
+      const taskId = "{task_id}";
+      const label = document.getElementById('upload-label');
+      const fill  = document.getElementById('upload-fill');
+      const note  = document.getElementById('upload-note');
+      const errEl = document.getElementById('upload-error');
+      const okEl  = document.getElementById('upload-result');
+
+      async function poll() {{
+        try {{
+          const r = await fetch('/upload/' + taskId + '/status');
+          if (!r.ok) throw new Error('status ' + r.status);
+          const s = await r.json();
+          label.textContent = s.label || s.stage || '…';
+          fill.style.width = (s.pct || 0) + '%';
+          note.textContent = s.note || '';
+          if (s.stage === 'error') {{
+            errEl.style.display = 'block';
+            errEl.textContent = s.error || 'Unknown error';
+            return;  // stop polling
+          }}
+          if (s.stage === 'done' && s.redirect) {{
+            okEl.style.display = 'block';
+            okEl.textContent = s.result || 'Done — redirecting…';
+            setTimeout(() => {{ window.location = s.redirect; }}, 800);
+            return;
+          }}
+          setTimeout(poll, 300);
+        }} catch (e) {{
+          setTimeout(poll, 800);
+        }}
+      }}
+      poll();
+    }})();
+  </script>
+"""
+    return _html_page("upload progress", body)
+
+
+def _render_discrepancy_warning(row: dict) -> str:
+    """Show a warning banner when our judged accuracy diverges materially from
+    the game-reported accuracy. This catches replays whose input data was
+    incompletely written by osu! (see empty-world FC investigation)."""
+    acc_r = row.get("accuracy_reported") or 0.0
+    acc_j = row.get("accuracy_judged") or 0.0
+    if acc_r == 0.0:
+        return ""
+    diff_pct = abs(acc_r - acc_j) * 100
+    # Absolute-accuracy delta threshold: 1.5 percentage points. Below that, it's
+    # normal edge-case noise. Above, something is off.
+    if diff_pct < 1.5:
+        return ""
+    if diff_pct < 5.0:
+        level = "minor"
+        msg = (f"Judged accuracy ({acc_j*100:.2f}%) differs from the game "
+               f"({acc_r*100:.2f}%) by {diff_pct:.2f} pp. Usually an edge-case in "
+               f"first-press-wins pairing; can be safely ignored.")
+    else:
+        level = "major"
+        msg = (f"Judged accuracy ({acc_j*100:.2f}%) diverges strongly from the "
+               f"game ({acc_r*100:.2f}%) — Δ {diff_pct:.2f} pp. The .osr replay "
+               f"data may be incomplete (known issue with some lazer builds). "
+               f"Skill-vector contribution is likely wrong for this replay.")
+    return f'<section class="disc-warn {level}"><span class="disc-icon">!</span><div>{msg}</div></section>'
 
 
 def _fc_badge(misses: int, oks: int) -> str:
@@ -1061,6 +1257,7 @@ def _render_replay(row: dict, player: str, features=None) -> str:
 
     features_section = _render_features_panel(features) if features else ""
     header_badge = _fc_badge(row.get("count_miss", 1), row.get("count_ok", 1))
+    warning_html = _render_discrepancy_warning(row)
 
     body = f"""
   <section>
@@ -1068,6 +1265,8 @@ def _render_replay(row: dict, player: str, features=None) -> str:
     <h1>{header_badge}{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
     <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}  ·  <a href="/replay/{player}/{row['id']}/inspect">open inspector →</a></p>
   </section>
+
+  {warning_html}
 
   <section class="stats-row">
     <div class="stat"><span class="k">reported acc</span><span class="v">{row['accuracy_reported']*100:.2f}%</span></div>
