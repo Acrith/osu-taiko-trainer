@@ -911,7 +911,18 @@ def _html_page(title: str, body: str, active: str = "") -> str:
   const tray = document.getElementById('uploads-tray');
   if (!tray) return;
   const state = new Map();  // id -> {{el, doneAt}}
-  const dismissed = new Set();  // ids the user closed — must not re-render even if server still lists them
+  // ids the user closed — must not re-render even if server still lists them.
+  // Persisted to sessionStorage so F5 keeps the toast dismissed within this tab.
+  const STORAGE_KEY = 'tt-dismissed-uploads';
+  const dismissed = new Set();
+  try {{
+    for (const id of JSON.parse(sessionStorage.getItem(STORAGE_KEY) || '[]')) {{
+      dismissed.add(id);
+    }}
+  }} catch (e) {{}}
+  function persistDismissed() {{
+    try {{ sessionStorage.setItem(STORAGE_KEY, JSON.stringify([...dismissed])); }} catch (e) {{}}
+  }}
 
   function make(id) {{
     const el = document.createElement('div');
@@ -927,6 +938,7 @@ def _html_page(title: str, body: str, active: str = "") -> str:
     tray.appendChild(el);
     el.querySelector('.ut-close').addEventListener('click', () => {{
       dismissed.add(id);
+      persistDismissed();
       el.remove();
       state.delete(id);
     }});
@@ -978,6 +990,14 @@ def _html_page(title: str, body: str, active: str = "") -> str:
         setTimeout(() => {{ entry.el.remove(); state.delete(id); }}, 500);
       }}
     }}
+    // Clean up dismissed ids the server has already GC'd — otherwise the set
+    // grows forever across dismissals within the same tab.
+    const active_ids = new Set(list.map(s => s.id));
+    let dirty = false;
+    for (const id of dismissed) {{
+      if (!active_ids.has(id)) {{ dismissed.delete(id); dirty = true; }}
+    }}
+    if (dirty) persistDismissed();
     setTimeout(poll, 800);
   }}
   poll();
