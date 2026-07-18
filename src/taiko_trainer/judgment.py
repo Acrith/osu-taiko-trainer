@@ -62,10 +62,15 @@ class JudgmentWindows:
     @classmethod
     def from_od(cls, od: float) -> "JudgmentWindows":
         # Anchors from ppy/osu TaikoHitWindows.cs at OD 0 / 5 / 10.
+        # osu!stable truncates the interpolated windows to integers before
+        # comparison, so a delta of exactly N ms with window 30.5 counts as OK
+        # (game floors to 30, then |Δ| < 30 → OK). Match that behavior by
+        # flooring the windows here rather than in every callsite.
+        import math
         return cls(
-            great=_od_lerp(od, 50.0, 35.0, 20.0),
-            ok=_od_lerp(od, 120.0, 80.0, 50.0),
-            miss=_od_lerp(od, 135.0, 95.0, 70.0),
+            great=math.floor(_od_lerp(od, 50.0, 35.0, 20.0)),
+            ok=math.floor(_od_lerp(od, 120.0, 80.0, 50.0)),
+            miss=math.floor(_od_lerp(od, 135.0, 95.0, 70.0)),
         )
 
 
