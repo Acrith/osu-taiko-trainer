@@ -27,6 +27,7 @@ from .db import (
     open_plays,
     rebuild_snapshots,
     snapshot_player_skill,
+    update_replay_judgment,
     upsert_map,
 )
 from .features import extract_features
@@ -132,12 +133,38 @@ def refresh_ratings(workspace: str) -> None:
     catalog.close()
     print(f"Refreshed {refreshed} maps")
 
-    # Rebuild snapshots chronologically (one per session) since map ratings changed.
+    # Rejudge every stored replay against the fresh map + latest parser,
+    # then rebuild snapshots chronologically (one per session).
+    import tempfile
     for player in discover_players(workspace):
         conn = open_plays(workspace, player)
+        replays = conn.execute("SELECT id, map_md5, content FROM replays").fetchall()
+        rejudged = 0
+        for r in replays:
+            map_bytes = get_map_content(conn, r["map_md5"])
+            if not map_bytes:
+                continue
+            try:
+                bm = _parse_bytes_as_osu(map_bytes)
+                with tempfile.NamedTemporaryFile(suffix=".osr", delete=False) as tmp:
+                    tmp.write(bytes(r["content"]))
+                    tmp_path = tmp.name
+                try:
+                    rp = parse_osr_file(tmp_path)
+                finally:
+                    Path(tmp_path).unlink(missing_ok=True)
+                feats = extract_features(bm)
+                judged = judge_replay(bm, rp)
+                classes = classify_failures(judged, bm, feats)
+                summary = summarize_failures(classes)
+                cheese = detect_cheese(judged)
+                update_replay_judgment(conn, r["id"], judged, summary, cheese)
+                rejudged += 1
+            except Exception as e:
+                print(f"  {player}: rejudge SKIP replay #{r['id']}: {e}")
         count = _rebuild_for_player(conn)
         conn.close()
-        print(f"  {player}: {count} session snapshot(s) rebuilt")
+        print(f"  {player}: {rejudged}/{len(replays)} replays rejudged  ·  {count} session snapshot(s) rebuilt")
 
 
 def main() -> None:

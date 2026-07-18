@@ -373,6 +373,46 @@ def get_config(conn: sqlite3.Connection, key: str, default: str | None = None) -
 # Replays
 # -----------------------------------------------------------------------------
 
+def update_replay_judgment(
+    conn: sqlite3.Connection,
+    replay_id: int,
+    judged: JudgedReplay,
+    classification: FailureSummary | None,
+    cheese: CheeseReport | None,
+) -> None:
+    """Overwrite the judged fields on an existing replay row (rejudge)."""
+    deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
+    if deltas:
+        mean = sum(deltas) / len(deltas)
+        var = sum((d - mean) ** 2 for d in deltas) / len(deltas)
+        stddev = var ** 0.5
+    else:
+        mean = stddev = None
+    classification_json = json.dumps(classification.by_cause) if classification else None
+    cheese_rate = cheese.cheese_rate if cheese else None
+    fast_cheese = cheese.fast_cheese_pairs if cheese else None
+    conn.execute(
+        """
+        UPDATE replays SET
+            accuracy_judged = ?,
+            count_great = ?, count_ok = ?, count_miss = ?,
+            delta_mean_ms = ?, delta_stddev_ms = ?,
+            cheese_rate = ?, fast_cheese_pairs = ?,
+            classification_json = ?
+        WHERE id = ?
+        """,
+        (
+            judged.accuracy,
+            judged.count_great, judged.count_ok, judged.count_miss,
+            mean, stddev,
+            cheese_rate, fast_cheese,
+            classification_json,
+            replay_id,
+        ),
+    )
+    conn.commit()
+
+
 def insert_replay(
     conn: sqlite3.Connection,
     replay: TaikoReplay,
