@@ -49,6 +49,12 @@ class TrainingReport:
     previous_session: Session | None
     dim_contributors: dict[str, tuple[SkillContribution, ...]] = None  # top-5 per dim
     snapshot_history: tuple[dict, ...] = ()  # snapshots oldest -> newest for the progression chart
+    # osu! profile fields (populated from player_info if linked via /settings/osu-user)
+    osu_user_id: int | None = None
+    osu_username: str | None = None
+    osu_avatar_url: str | None = None
+    osu_country_code: str | None = None
+    osu_global_rank: int | None = None
 
 
 def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingReport | None:
@@ -57,8 +63,11 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
     if not snap:
         return None
 
-    # Player name comes from player_info.
-    prow = conn.execute("SELECT name, style FROM player_info LIMIT 1").fetchone()
+    # Player name + osu! profile linkage come from player_info.
+    prow = conn.execute(
+        "SELECT name, style, osu_user_id, osu_username, osu_avatar_url, "
+        "osu_country_code, osu_global_rank FROM player_info LIMIT 1"
+    ).fetchone()
     if not prow:
         return None
     player = prow["name"]
@@ -134,6 +143,11 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
         misses_by_cause=misses_by_cause,
         avg_delta_stddev_ms=avg_stddev,
         avg_cheese_rate=avg_cheese,
+        osu_user_id=prow["osu_user_id"],
+        osu_username=prow["osu_username"],
+        osu_avatar_url=prow["osu_avatar_url"],
+        osu_country_code=prow["osu_country_code"],
+        osu_global_rank=prow["osu_global_rank"],
         suggestions=tuple(suggestions),
         latest_session=latest_session,
         previous_session=previous_session,

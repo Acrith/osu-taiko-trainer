@@ -135,14 +135,16 @@ def create_app(workspace: str) -> FastAPI:
                             flash_ok=flash_ok, flash_err=flash_err)
 
     @app.get("/player/{name}", response_class=HTMLResponse)
-    def player_page(name: str):
+    def player_page(name: str, request: Request):
         conn = open_plays(workspace, name)
         report = build_report(conn)
         replays = get_replays(conn) if report else []
         conn.close()
         if report is None:
             return HTMLResponse(_render_error(f"No snapshots for player {name!r}. Drop a replay first."), status_code=404)
-        return _render_report(report, replays, name)
+        flash_ok = request.query_params.get("ok", "")
+        flash_err = request.query_params.get("err", "")
+        return _render_report(report, replays, name, flash_ok=flash_ok, flash_err=flash_err)
 
     @app.get("/player/{name}/train/{dim}", response_class=HTMLResponse)
     def train_page(name: str, dim: str):
@@ -372,6 +374,39 @@ def create_app(workspace: str) -> FastAPI:
         conn.close()
         return RedirectResponse(url="/", status_code=303)
 
+    @app.post("/settings/osu-user")
+    async def link_osu_user(player: str = Form(...), osu_username: str = Form(...)):
+        from . import osu_api
+        catalog = open_catalog(workspace)
+        try:
+            if not osu_api.is_configured(catalog):
+                catalog.close()
+                return RedirectResponse(url=f"/player/{player}?err=osu-api-not-configured", status_code=303)
+            user = osu_api.lookup_user(catalog, osu_username.strip())
+        except osu_api.OsuApiError as e:
+            catalog.close()
+            return RedirectResponse(url=f"/player/{player}?err=osu-lookup-failed:{str(e)[:80]}", status_code=303)
+        catalog.close()
+        if user is None:
+            return RedirectResponse(url=f"/player/{player}?err=osu-user-not-found:{osu_username}", status_code=303)
+        conn = open_plays(workspace, player)
+        db_module.set_osu_profile(
+            conn, player,
+            user_id=user.id, username=user.username,
+            avatar_url=user.avatar_url, country_code=user.country_code,
+            global_rank=user.global_rank_taiko,
+        )
+        conn.close()
+        return RedirectResponse(url=f"/player/{player}?ok=osu-linked", status_code=303)
+
+    @app.post("/settings/osu-user/unlink")
+    async def unlink_osu_user(player: str = Form(...)):
+        conn = open_plays(workspace, player)
+        db_module.set_osu_profile(conn, player, user_id=None, username=None,
+                                  avatar_url=None, country_code=None, global_rank=None)
+        conn.close()
+        return RedirectResponse(url=f"/player/{player}?ok=osu-unlinked", status_code=303)
+
     @app.post("/settings/osu-api")
     async def save_osu_api(client_id: str = Form(...), client_secret: str = Form(...)):
         from . import osu_api
@@ -511,6 +546,12 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-map .muted { color: var(--ink-faint); }
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
+/* --- osu! profile link section --- */
+.osu-link-linked { display: flex; align-items: center; gap: 16px; padding-top: 8px; }
+.osu-link-avatar { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; border: 1px solid var(--rule); }
+.hero-country { display: inline-block; padding: 2px 8px; font-size: 10px; letter-spacing: 0.12em; background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.9); border-radius: 3px; }
+.hero-rank { font-size: 11px; color: rgba(255,255,255,0.65); }
+
 /* --- osu! API status card --- */
 .api-status { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 4px; font-family: var(--font-mono); font-size: 13px; }
 .api-status.connected { background: rgba(74, 119, 82, 0.14); border: 1px solid var(--great); color: var(--ink); }
@@ -823,6 +864,89 @@ _STYLE_BADGE = {
     "unknown": ("STYLE?", "playstyle not set"),
 }
 
+def _render_player_flash(flash_ok: str, flash_err: str) -> str:
+    """Small banner above the hero for osu! link outcomes."""
+    if flash_ok == "osu-linked":
+        return '<div class="flash flash-ok">✓ osu! profile linked. Refresh to see the avatar as your hero background.</div>'
+    if flash_ok == "osu-unlinked":
+        return '<div class="flash flash-ok">✓ osu! profile unlinked.</div>'
+    if flash_err.startswith("osu-user-not-found:"):
+        who = flash_err[len("osu-user-not-found:"):]
+        return f'<div class="flash flash-err">✗ Couldn\'t find osu! user &quot;{who}&quot;.</div>'
+    if flash_err.startswith("osu-lookup-failed:"):
+        why = flash_err[len("osu-lookup-failed:"):]
+        return f'<div class="flash flash-err">✗ osu! lookup failed: {why}</div>'
+    if flash_err == "osu-api-not-configured":
+        return ('<div class="flash flash-err">✗ osu! API not configured. Set it up on the '
+                '<a href="/">home page</a> first.</div>')
+    return ""
+
+
+def _render_osu_link_section(player: str, report) -> str:
+    """Settings-style card at the bottom of the player page for linking an
+    osu! profile. Shows the linked profile (with avatar) OR a form to link."""
+    if getattr(report, "osu_username", None):
+        avatar = report.osu_avatar_url or ""
+        return f"""
+  <section class="card" id="osu-link">
+    <h2>Linked osu! profile</h2>
+    <div class="osu-link-linked">
+      {'<img src="' + avatar + '" alt="avatar" class="osu-link-avatar">' if avatar else ''}
+      <div>
+        <div style="font-family: var(--font-mono); font-size: 16px; color: var(--ink); font-weight: 500;">
+          <a href="https://osu.ppy.sh/users/{report.osu_user_id}" target="_blank" rel="noopener">{report.osu_username}</a>
+        </div>
+        <div class="hint">
+          osu! ID: {report.osu_user_id}{" · country: " + report.osu_country_code if report.osu_country_code else ""}{" · global rank taiko: #" + f"{report.osu_global_rank:,}" if report.osu_global_rank else ""}
+        </div>
+      </div>
+      <form method="post" action="/settings/osu-user/unlink" style="margin-left: auto;">
+        <input type="hidden" name="player" value="{player}">
+        <button type="submit" class="hero-btn">Unlink</button>
+      </form>
+    </div>
+  </section>"""
+    return f"""
+  <section class="card" id="osu-link">
+    <h2>Link an osu! profile</h2>
+    <p class="hint">Pull your avatar / country / taiko rank from osu.ppy.sh and use the avatar as this page's hero background. Requires the osu! API to be configured on the home page first.</p>
+    <form class="inline-form" method="post" action="/settings/osu-user" style="margin-top: 12px;">
+      <input type="hidden" name="player" value="{player}">
+      <input type="text" name="osu_username" placeholder="osu! username (e.g. Acrith)" required style="flex: 1;">
+      <button type="submit">Link</button>
+    </form>
+  </section>"""
+
+
+def _render_osu_subtitle(report) -> str:
+    """Under-title subtitle: shows 'training profile' if not linked, or the
+    osu! username + country/rank badge if linked."""
+    if not getattr(report, "osu_username", None):
+        return "training profile"
+    username = report.osu_username
+    country = getattr(report, "osu_country_code", "") or ""
+    rank = getattr(report, "osu_global_rank", None)
+    parts = [f'<a href="https://osu.ppy.sh/users/{report.osu_user_id}" target="_blank" rel="noopener" style="color: inherit;">{username}</a>']
+    if country:
+        parts.append(f'<span class="hero-country">{country}</span>')
+    if rank:
+        parts.append(f'<span class="hero-rank">#{rank:,} taiko</span>')
+    return "  ·  ".join(parts)
+
+
+def _render_osu_profile_link(player: str, report) -> str:
+    """Renders 'Link osu! profile' button (opens a details+form) or 'Unlink'
+    button when already linked."""
+    if getattr(report, "osu_username", None):
+        return (
+            f'<form method="post" action="/settings/osu-user/unlink" style="display: inline;">'
+            f'<input type="hidden" name="player" value="{player}">'
+            f'<button type="submit" class="hero-btn" style="cursor: pointer; background: transparent;">Unlink osu!</button>'
+            f'</form>'
+        )
+    return f'<a class="hero-btn" href="#osu-link">Link osu! profile ↓</a>'
+
+
 def _render_player_hero(report, replays: list[dict], player: str) -> str:
     """Player-profile hero card, mirrors the beatmap hero layout."""
     d = report.skill.as_dict()
@@ -845,12 +969,22 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
         raw = history[-1].get("latest_replay_played_at", "")
         latest_date = raw[:10] if raw else ""
 
-    # Dark base with just a hint of warmth on the right — mirrors how the
-    # beatmap hero card reads (dimmed cover image) instead of a loud gradient.
-    bg = ("background: "
-          "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
-          "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
-          "#16181D;")
+    # If we have an osu! avatar linked, use it dimmed as the background image
+    # (same treatment as the beatmap hero cover). Otherwise fall back to a
+    # dark base with subtle warm/cool radial hotspots.
+    avatar_url = getattr(report, "osu_avatar_url", None)
+    if avatar_url:
+        bg = (
+            "background: "
+            f"linear-gradient(180deg, rgba(15,17,20,0.35) 0%, rgba(15,17,20,0.92) 100%), "
+            f'url("{avatar_url}"); '
+            "background-size: cover; background-position: center;"
+        )
+    else:
+        bg = ("background: "
+              "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
+              "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
+              "#16181D;")
 
     return f"""
   <section class="map-hero" style='{bg}'>
@@ -861,10 +995,11 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
           <span class="hero-style-desc">{style_desc}</span>
         </div>
         <h1 class="hero-title">{player}</h1>
-        <p class="hero-artist">training profile</p>
+        <p class="hero-artist">{_render_osu_subtitle(report)}</p>
         <p class="hero-meta">{report.replays} replays  ·  {sess_count} sessions  ·  {unique_maps} unique maps{("  ·  latest " + latest_date) if latest_date else ""}</p>
         <div class="hero-actions">
           <a class="hero-btn" href="/">← Home</a>
+          {_render_osu_profile_link(player, report)}
         </div>
       </div>
       <div class="hero-right">
@@ -1418,7 +1553,8 @@ def _render_osu_api_form() -> str:
     """
 
 
-def _render_report(report, replays: list[dict] | None = None, player_name: str | None = None) -> str:
+def _render_report(report, replays: list[dict] | None = None, player_name: str | None = None,
+                   flash_ok: str = "", flash_err: str = "") -> str:
     d = report.skill.as_dict()
     max_skill = max(d.values()) or 1
 
@@ -1523,7 +1659,9 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
         if not suggestions_html.strip():
             suggestions_html = "<p class='hint'>No maps in DB with growth potential for this dimension. Add more via drop-zone.</p>"
 
+    flash_banner = _render_player_flash(flash_ok, flash_err)
     body = f"""
+  {flash_banner}
   {_render_player_hero(report, replays or [], player_name or report.player)}
 
   <section class="card">
@@ -1548,6 +1686,8 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
   </section>
 
   {_render_replays_table(replays or [], player_name or report.player)}
+
+  {_render_osu_link_section(player_name or report.player, report)}
 """
     return _html_page(f"{report.player} report", body)
 

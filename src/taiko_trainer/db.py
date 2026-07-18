@@ -83,7 +83,12 @@ CREATE TABLE IF NOT EXISTS player_info (
     name                TEXT PRIMARY KEY,
     style               TEXT NOT NULL DEFAULT 'kddk',
     notes               TEXT,
-    updated_at          TEXT NOT NULL
+    updated_at          TEXT NOT NULL,
+    osu_user_id         INTEGER,
+    osu_username        TEXT,
+    osu_avatar_url      TEXT,
+    osu_country_code    TEXT,
+    osu_global_rank     INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS replays (
@@ -184,6 +189,7 @@ def open_plays(workspace: str | Path, player: str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(plays))
     conn.row_factory = sqlite3.Row
     conn.executescript(_PLAYS_SCHEMA)
+    _migrate_plays_schema(conn)
     conn.execute(f"ATTACH DATABASE '{catalog}' AS catalog")
     # Ensure a player_info row exists (default style: unknown until user sets it).
     exists = conn.execute("SELECT 1 FROM player_info WHERE name = ?", (player,)).fetchone()
@@ -194,6 +200,22 @@ def open_plays(workspace: str | Path, player: str) -> sqlite3.Connection:
         )
     conn.commit()
     return conn
+
+
+def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
+    """Add columns that were introduced after the initial schema. SQLite has no
+    'ADD COLUMN IF NOT EXISTS', so check pragma_table_info first."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(player_info)")}
+    for col, ddl in (
+        ("osu_user_id",      "ALTER TABLE player_info ADD COLUMN osu_user_id INTEGER"),
+        ("osu_username",     "ALTER TABLE player_info ADD COLUMN osu_username TEXT"),
+        ("osu_avatar_url",   "ALTER TABLE player_info ADD COLUMN osu_avatar_url TEXT"),
+        ("osu_country_code", "ALTER TABLE player_info ADD COLUMN osu_country_code TEXT"),
+        ("osu_global_rank",  "ALTER TABLE player_info ADD COLUMN osu_global_rank INTEGER"),
+    ):
+        if col not in existing:
+            conn.execute(ddl)
+    conn.commit()
 
 
 def discover_players(workspace: str | Path = DEFAULT_WORKSPACE) -> list[str]:
@@ -352,6 +374,32 @@ def upsert_player(
 def get_player(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM player_info WHERE name = ?", (name,)).fetchone()
     return dict(row) if row else None
+
+
+def set_osu_profile(
+    conn: sqlite3.Connection,
+    name: str,
+    user_id: int,
+    username: str,
+    avatar_url: str,
+    country_code: str,
+    global_rank: int | None,
+) -> None:
+    """Link an osu! profile (from osu_api.lookup_user) to a player."""
+    conn.execute(
+        """
+        UPDATE player_info SET
+            osu_user_id = ?,
+            osu_username = ?,
+            osu_avatar_url = ?,
+            osu_country_code = ?,
+            osu_global_rank = ?,
+            updated_at = ?
+        WHERE name = ?
+        """,
+        (user_id, username, avatar_url, country_code, global_rank, _now(), name),
+    )
+    conn.commit()
 
 
 def add_map_root(conn: sqlite3.Connection, path: str) -> None:
