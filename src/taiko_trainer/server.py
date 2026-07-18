@@ -911,6 +911,7 @@ def _html_page(title: str, body: str, active: str = "") -> str:
   const tray = document.getElementById('uploads-tray');
   if (!tray) return;
   const state = new Map();  // id -> {{el, doneAt}}
+  const dismissed = new Set();  // ids the user closed — must not re-render even if server still lists them
 
   function make(id) {{
     const el = document.createElement('div');
@@ -924,7 +925,11 @@ def _html_page(title: str, body: str, active: str = "") -> str:
       <div class="ut-note"></div>
       <div class="ut-filename"></div>`;
     tray.appendChild(el);
-    el.querySelector('.ut-close').addEventListener('click', () => {{ el.remove(); state.delete(id); }});
+    el.querySelector('.ut-close').addEventListener('click', () => {{
+      dismissed.add(id);
+      el.remove();
+      state.delete(id);
+    }});
     return el;
   }}
 
@@ -940,6 +945,7 @@ def _html_page(title: str, body: str, active: str = "") -> str:
     }}
     const seen = new Set();
     for (const s of list) {{
+      if (dismissed.has(s.id)) continue;  // user closed this toast — don't resurrect it
       seen.add(s.id);
       let entry = state.get(s.id);
       if (!entry) {{
