@@ -62,6 +62,8 @@ _STAGE_LABELS = {
     "search_hash":    ("Searching for map",    "dynamic"),   # 15..70 based on done/total
     "search_hit":     ("Map found",            70),
     "rate_map":       ("Computing map rating", 75),
+    "ingest_siblings":("Scanning sibling difficulties", 77),
+    "siblings_done":  ("Siblings added",       78),
     "judge":          ("Judging per note",     80),
     "classify":       ("Classifying misses",   90),
     "store":          ("Writing to database",  95),

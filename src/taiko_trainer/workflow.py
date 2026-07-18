@@ -71,11 +71,15 @@ def _resolve_map(
     explicit_map_path: str | None,
     search_roots: list[str],
     progress_cb=None,
-) -> tuple[bytes | None, TaikoBeatmap | None]:
+) -> tuple[bytes | None, TaikoBeatmap | None, Path | None]:
     """Try to obtain the map bytes for target_md5 from local sources.
 
+    Returns (content, beatmap, source_path).  source_path is the .osu file we
+    matched on disk (None if the map came from the catalog cache); the caller
+    uses it to ingest sibling difficulties from the same beatmap folder.
+
     Order:
-      1. Already in catalog.db (returns stored blob)
+      1. Already in catalog.db (returns stored blob, source_path=None)
       2. Explicit --map path (must match md5)
       3. Any registered map root (recursive glob)
       4. TODO: osu! API — see memory/project_osu_api_integration.md
@@ -90,7 +94,7 @@ def _resolve_map(
         content = db_module.get_map_content(catalog, target_md5)
         catalog.close()
         if content:
-            return content, _parse_bytes_as_osu(content)
+            return content, _parse_bytes_as_osu(content), None
 
     if explicit_map_path:
         _report("explicit_map", note=f"checking {Path(explicit_map_path).name}")
@@ -99,9 +103,9 @@ def _resolve_map(
             content = p.read_bytes()
             if hashlib.md5(content).hexdigest() == target_md5:
                 catalog.close()
-                return content, _parse_bytes_as_osu(content)
+                return content, _parse_bytes_as_osu(content), p
         catalog.close()
-        return None, None
+        return None, None, None
 
     for root in search_roots:
         root_p = Path(root)
@@ -121,10 +125,56 @@ def _resolve_map(
             if hashlib.md5(content).hexdigest() == target_md5:
                 _report("search_hit", total=n, done=i, note=cand.name)
                 catalog.close()
-                return content, _parse_bytes_as_osu(content)
+                return content, _parse_bytes_as_osu(content), cand
 
     catalog.close()
-    return None, None
+    return None, None, None
+
+
+def _ingest_sibling_maps(
+    workspace: str | Path,
+    folder: Path,
+    exclude_md5: str,
+    progress_cb=None,
+) -> int:
+    """After we find a played map on disk, ingest every other .osu in the same
+    folder. Costs almost nothing (files are local, already an mtime hit) and
+    enormously grows the recommendation pool: every uploaded Oni contributes
+    its Kantan/Futsuu/Muzukashii/Inner Oni ratings to future suggestions.
+    Skipped: the played diff itself (already ingested by the caller), any
+    non-taiko map, any md5 already in the catalog. Returns count added."""
+    def _report(stage, total=None, done=None, note=""):
+        if progress_cb: progress_cb(stage=stage, total=total, done=done, note=note)
+
+    if not folder.exists() or not folder.is_dir():
+        return 0
+    siblings = [p for p in folder.glob("*.osu")]
+    if not siblings:
+        return 0
+
+    catalog = open_catalog(workspace)
+    added = 0
+    for i, cand in enumerate(siblings):
+        _report("ingest_siblings", total=len(siblings), done=i, note=f"sibling: {cand.name}")
+        try:
+            content = cand.read_bytes()
+        except OSError:
+            continue
+        md5 = hashlib.md5(content).hexdigest()
+        if md5 == exclude_md5 or get_map(catalog, md5):
+            continue
+        try:
+            bm = _parse_bytes_as_osu(content)
+        except Exception:
+            continue
+        if bm.mode != 1:  # non-taiko
+            continue
+        features = extract_features(bm)
+        rating = rate_map(features)
+        upsert_map(catalog, bm, features, rating, content)
+        added += 1
+    catalog.close()
+    return added
 
 
 def add_replay(
@@ -157,7 +207,7 @@ def add_replay(
     plays.close()
 
     _report("resolve_map", note=f"looking up map md5 {target_md5[:8]}...")
-    map_content, bm = _resolve_map(workspace, target_md5, map_path, roots, progress_cb=progress_cb)
+    map_content, bm, source_path = _resolve_map(workspace, target_md5, map_path, roots, progress_cb=progress_cb)
     if bm is None or map_content is None:
         msg = [
             f"could not resolve map with md5 {target_md5}",
@@ -175,6 +225,18 @@ def add_replay(
     # Store the map in the catalog (blob + cached rating).
     plays = open_plays(workspace, player)  # this ATTACHes catalog
     upsert_map(plays, bm, features, rating, map_content)
+    plays.close()
+
+    # Also ingest sibling difficulties from the beatmap folder. Grows the
+    # recommendation pool for free — no additional file search, and any
+    # sibling ingested here has ratings but no player-play data so nothing
+    # inflates the skill vector.
+    if source_path is not None:
+        added = _ingest_sibling_maps(workspace, source_path.parent, target_md5, progress_cb=progress_cb)
+        if added:
+            _report("siblings_done", note=f"+{added} sibling difficulties added to catalog")
+
+    plays = open_plays(workspace, player)  # reopen for the rest of the pipeline
 
     _report("judge", note="running per-note judgment")
     judged = judge_replay(bm, rp)
