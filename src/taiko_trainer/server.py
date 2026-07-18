@@ -490,11 +490,15 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .forecast-scroll::-webkit-scrollbar-track { background: var(--panel); }
 .forecast-scroll::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 4px; }
 .forecast-grid { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); }
-.target-cell { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.target-cell { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .target-cell .target-acc { font-size: 9px; letter-spacing: 0.08em; color: var(--ink-faint); text-transform: uppercase; }
-.target-cell .target-gain-pos { font-size: 13px; color: var(--great); font-weight: 500; font-variant-numeric: tabular-nums; }
+.target-cell .target-acc-ss { color: #d4af37; font-weight: 700; letter-spacing: 0.12em; }
+.target-cell .target-gain-pos { font-size: 13px; color: var(--great); font-weight: 400; font-variant-numeric: tabular-nums; }
+.target-cell .target-gain-ss { font-size: 13px; color: #d4af37; font-weight: 700; font-variant-numeric: tabular-nums; text-shadow: 0 0 6px rgba(212, 175, 55, 0.35); }
 .target-cell-empty { }
-.target-ceiling { font-size: 11px; color: var(--ink-faint); font-style: italic; text-align: right; }
+.target-ceiling { font-size: 11px; color: var(--ink-faint); font-style: italic; text-align: center; }
+.forecast-header { position: sticky; top: 0; background: var(--panel); z-index: 2; }
+.forecast-improved-hdr { text-align: center; }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
 .forecast-row:last-child { border-bottom: none; }
 .forecast-header { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); border-bottom: 1px solid var(--rule); }
@@ -1842,11 +1846,14 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
     def _fmt_target_cell(target, gain):
         if target is None or gain < 0.5:
             return '<span class="tr target-cell-empty"></span>'
-        acc_pct = "SS" if target >= 1.0 else f"{target*100:.2f}%".rstrip("0").rstrip(".")
+        is_ss = target >= 1.0
+        acc_pct = "SS" if is_ss else f"{target*100:.2f}%".rstrip("0").rstrip(".")
+        acc_cls = "target-acc target-acc-ss" if is_ss else "target-acc"
+        gain_cls = "target-gain-ss" if is_ss else "target-gain-pos"
         return (
             f'<span class="tr target-cell">'
-            f'<span class="target-acc">{acc_pct}</span>'
-            f'<span class="target-gain-pos">+{gain:.0f}</span>'
+            f'<span class="{acc_cls}">{acc_pct}</span>'
+            f'<span class="{gain_cls}">+{gain:.0f}</span>'
             f'</span>'
         )
 
@@ -1856,9 +1863,7 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
             '<div class="forecast-row forecast-header">'
             '<span></span><span>map</span>'
             '<span class="tr">current</span>'
-            '<span class="tr">next</span>'
-            '<span class="tr">→</span>'
-            '<span class="tr">→</span>'
+            '<span class="tr forecast-improved-hdr" style="grid-column: span 3;">if improved</span>'
             '</div>'
         )
         parts = []
