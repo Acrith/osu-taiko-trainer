@@ -148,11 +148,16 @@ _DIMS = ("speed", "stamina", "gimmick", "technical", "consistency")
 def _compute_dim_contributors(replays: list[dict], top_n: int = 5) -> dict[str, tuple[SkillContribution, ...]]:
     """Mirror player.compute_player_skill's per-dim weighting so the caller can show
     which replays drove each dimension's skill number. Rank is by desc contribution
-    (map_rating * accuracy_scaling), weight = 0.9^rank."""
+    (map_rating * accuracy_scaling), weight = 0.9^rank.
+
+    Per-map dedup: only the best attempt per map_md5 shows up in the list. Matches
+    the dedup in compute_player_skill so the contributor list actually explains
+    the skill number instead of showing duplicates that inflate the impression."""
     result: dict[str, tuple[SkillContribution, ...]] = {}
     for dim in _DIMS:
         rating_col = f"rating_{dim}"
-        candidates: list[tuple[float, dict]] = []
+        # Best replay per map for THIS dim: (contribution, replay-row).
+        best_per_map: dict[str, tuple[float, dict]] = {}
         for r in replays:
             rating = r.get(rating_col) or 0.0
             acc = r.get("accuracy_judged") or 0.0
@@ -160,8 +165,10 @@ def _compute_dim_contributors(replays: list[dict], top_n: int = 5) -> dict[str, 
             contribution = rating * scale
             if contribution <= 0:
                 continue
-            candidates.append((contribution, r))
-        candidates.sort(key=lambda kv: -kv[0])
+            md5 = r.get("map_md5") or ""
+            if contribution > best_per_map.get(md5, (0.0, None))[0]:
+                best_per_map[md5] = (contribution, r)
+        candidates = sorted(best_per_map.values(), key=lambda kv: -kv[0])
         contribs: list[SkillContribution] = []
         for rank, (contribution, r) in enumerate(candidates[:top_n]):
             weight = _DECAY ** rank

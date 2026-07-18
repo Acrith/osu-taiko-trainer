@@ -71,25 +71,37 @@ def _weighted_top_sum(performances: list[float]) -> float:
 
 
 def compute_player_skill(performances: list[ReplayPerformance]) -> PlayerSkill:
-    """Aggregate a list of replay performances into a 5-D skill vector."""
+    """Aggregate a list of replay performances into a 5-D skill vector.
+
+    Per-map dedup: multiple replays of the same (map_title, map_diff) count
+    only once per dimension, at the best (highest contribution) attempt.
+    Mirrors osu!'s pp system where only your top score on each beatmap feeds
+    your total. Without this, re-uploading the same replay or grinding a map
+    twice doubles its contribution to your skill number."""
     if not performances:
         return PlayerSkill(0.0, 0.0, 0.0, 0.0, 0.0)
 
-    dim_perfs: dict[str, list[float]] = {
-        "speed": [], "stamina": [], "gimmick": [], "technical": [], "consistency": [],
+    # per_dim[dim][(title, diff)] = best contribution seen so far
+    per_dim: dict[str, dict[tuple[str, str], float]] = {
+        "speed": {}, "stamina": {}, "gimmick": {}, "technical": {}, "consistency": {},
     }
     for p in performances:
         scale = _accuracy_scaling(p.accuracy)
+        if scale <= 0:
+            continue
         rating = p.map_rating.as_dict()
-        for dim in dim_perfs:
+        key = (p.map_title, p.map_diff)
+        for dim, bucket in per_dim.items():
             contribution = rating[dim] * scale
-            if contribution > 0:
-                dim_perfs[dim].append(contribution)
+            if contribution <= 0:
+                continue
+            if contribution > bucket.get(key, 0.0):
+                bucket[key] = contribution
 
     return PlayerSkill(
-        speed=_weighted_top_sum(dim_perfs["speed"]),
-        stamina=_weighted_top_sum(dim_perfs["stamina"]),
-        gimmick=_weighted_top_sum(dim_perfs["gimmick"]),
-        technical=_weighted_top_sum(dim_perfs["technical"]),
-        consistency=_weighted_top_sum(dim_perfs["consistency"]),
+        speed=_weighted_top_sum(list(per_dim["speed"].values())),
+        stamina=_weighted_top_sum(list(per_dim["stamina"].values())),
+        gimmick=_weighted_top_sum(list(per_dim["gimmick"].values())),
+        technical=_weighted_top_sum(list(per_dim["technical"].values())),
+        consistency=_weighted_top_sum(list(per_dim["consistency"].values())),
     )
