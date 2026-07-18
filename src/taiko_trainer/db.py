@@ -483,6 +483,7 @@ def get_replays(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                r.cheese_rate, r.fast_cheese_pairs,
                r.classification_json, r.inserted_at,
                m.title AS map_title, m.version AS map_version, m.creator AS map_creator,
+               m.beatmap_id, m.beatmapset_id,
                m.rating_speed, m.rating_stamina, m.rating_gimmick,
                m.rating_technical, m.rating_consistency
         FROM replays r

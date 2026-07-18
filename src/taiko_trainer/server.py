@@ -178,6 +178,30 @@ def create_app(workspace: str) -> FastAPI:
         judged = judge_replay(bm, rp)
         return _render_inspector(dict(row), player, judged, rp)
 
+    @app.get("/replay/{player}/{replay_id}/osr")
+    def download_osr(player: str, replay_id: int):
+        from fastapi.responses import Response
+        conn = open_plays(workspace, player)
+        row = conn.execute(
+            """
+            SELECT r.content, r.played_at, m.title, m.version
+            FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
+            WHERE r.id = ?
+            """,
+            (replay_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404)
+        # Sanitize a filename that Windows + macOS will accept.
+        raw = f"{player} - {row['title']} [{row['version']}] ({row['played_at'][:10]}) Taiko.osr"
+        safe = "".join(c if c.isalnum() or c in " ._-()[]" else "_" for c in raw)
+        return Response(
+            content=bytes(row["content"]),
+            media_type="application/x-osu-replay",
+            headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+        )
+
     @app.get("/replay/{player}/{replay_id}", response_class=HTMLResponse)
     def replay_page(player: str, replay_id: int):
         conn = open_plays(workspace, player)
@@ -185,6 +209,7 @@ def create_app(workspace: str) -> FastAPI:
             """
             SELECT r.*, m.title AS map_title, m.version AS map_version, m.creator AS map_creator,
                    m.md5 AS map_md5_ref,
+                   m.beatmap_id, m.beatmapset_id,
                    m.rating_speed, m.rating_stamina, m.rating_gimmick,
                    m.rating_technical, m.rating_consistency
             FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
@@ -419,6 +444,11 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-map .muted { color: var(--ink-faint); }
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
+.row-link { display: inline-block; padding: 2px 6px; margin: 0 2px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; background: var(--panel); color: var(--ink-muted); border: 1px solid var(--rule); border-radius: 3px; text-decoration: none; }
+.row-link:hover { color: var(--accent); border-color: var(--accent-soft); text-decoration: none; }
+.row-link-muted { display: inline-block; padding: 2px 6px; margin: 0 2px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); opacity: 0.4; }
+td.links { text-align: right; white-space: nowrap; }
+th.links-col { text-align: right; }
 .upload-status { display: flex; flex-direction: column; gap: 10px; }
 .upload-label { font-family: var(--font-mono); font-size: 14px; color: var(--ink); font-weight: 500; }
 .upload-bar { height: 10px; background: var(--rule); border-radius: 5px; overflow: hidden; }
@@ -1202,28 +1232,46 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
             f'<td style="color: var(--great);">FC</td>' if misses == 0
             else f'<td style="color: var(--miss);">{misses}</td>'
         )
+        bid = r.get("beatmap_id")
+        osu_link = (
+            f'<a class="row-link" href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener" title="open on osu.ppy.sh">osu!</a>'
+            if bid else '<span class="row-link-muted">osu!</span>'
+        )
+        osr_link = f'<a class="row-link" href="/replay/{player}/{r["id"]}/osr" title="download .osr (opens in osu! if installed)" download>.osr</a>'
+        links_cell = f'<td class="links">{osu_link}  {osr_link}</td>'
         rows += (
-            f'<tr onclick="window.location=\'/replay/{player}/{r["id"]}\'" style="cursor:pointer">'
+            f'<tr class="row-nav" data-href="/replay/{player}/{r["id"]}" style="cursor:pointer">'
             f'<td class="name">{badge}{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span></td>'
             f'<td class="muted">{played}</td>'
             f'<td>{acc:.2f}%</td>'
             f'{miss_cell}'
             f'<td>{stddev:.1f} ms</td>'
             f'<td>{cheese:.2f}%</td>'
+            f'{links_cell}'
             f'</tr>'
         )
     return f"""
   <section class="card">
     <h2>Replays ({len(replays)})</h2>
-    <p class="hint">click a row to see the per-note breakdown</p>
+    <p class="hint">click a row to see the per-note breakdown  ·  osu! opens the beatmap page  ·  .osr downloads and opens in-game if installed</p>
     <div style="overflow-x: auto; margin-top: 12px;">
       <table>
         <thead><tr>
-          <th>map</th><th>played</th><th>acc</th><th>miss</th><th>Δ σ</th><th>cheese</th>
+          <th>map</th><th>played</th><th>acc</th><th>miss</th><th>Δ σ</th><th>cheese</th><th class="links-col">links</th>
         </tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
+    <script>
+      // Row navigation that respects link clicks: if the target is an <a>, let
+      // it work normally; otherwise navigate to the row's data-href.
+      document.querySelectorAll('.row-nav').forEach(tr => {{
+        tr.addEventListener('click', ev => {{
+          if (ev.target.closest('a')) return;
+          window.location = tr.dataset.href;
+        }});
+      }});
+    </script>
   </section>"""
 
 
@@ -1258,12 +1306,18 @@ def _render_replay(row: dict, player: str, features=None) -> str:
     features_section = _render_features_panel(features) if features else ""
     header_badge = _fc_badge(row.get("count_miss", 1), row.get("count_ok", 1))
     warning_html = _render_discrepancy_warning(row)
+    bid = row.get("beatmap_id")
+    osu_link = (
+        f'  ·  <a href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener">osu! page →</a>'
+        if bid else ''
+    )
+    osr_link = f'  ·  <a href="/replay/{player}/{row["id"]}/osr" download>download .osr →</a>'
 
     body = f"""
   <section>
     <span class="eyebrow"><a href="/player/{player}" style="color: var(--ink-muted);">← {player}</a>  ·  replay #{row['id']}</span>
     <h1>{header_badge}{row['map_title']} <span style="color: var(--ink-muted); font-size: 20px;">[{row['map_version']}]</span></h1>
-    <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}  ·  <a href="/replay/{player}/{row['id']}/inspect">open inspector →</a></p>
+    <p class="hint">mapped by {row.get('map_creator','?')}  ·  played {row['played_at'][:19].replace('T', ' ')}  ·  <a href="/replay/{player}/{row['id']}/inspect">open inspector →</a>{osu_link}{osr_link}</p>
   </section>
 
   {warning_html}
