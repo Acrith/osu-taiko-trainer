@@ -123,17 +123,32 @@ def compute_parity(hittable: tuple[HitObject, ...]) -> ParityProfile:
         if alternating:
             continue
 
-        # Otherwise: variance of run lengths as hostility score.
-        avg_len = sum(lengths) / len(lengths)
-        var_len = sum((l - avg_len) ** 2 for l in lengths) / len(lengths)
-        # Normalize: variance of 3.0 → full hostility (empirical from examples).
-        # Also modulate by local tempo — mixed chunks at slow tempo are less painful.
-        # Use gap around the current note as tempo proxy.
+        # Tempo modulation — mixed chunks at slow tempo are less painful.
         gap_prev = hittable[i].time_ms - hittable[i - 1].time_ms if i > 0 else 500
         gap_next = hittable[i + 1].time_ms - hittable[i].time_ms if i < n - 1 else 500
         avg_gap = (gap_prev + gap_next) / 2.0
         tempo_factor = max(0.0, 1.0 - avg_gap / 250.0)
-        misalign[i] = max(misalign[i], min(1.0, var_len / 3.0) * 0.7 * tempo_factor)
+        if tempo_factor <= 0:
+            continue
+
+        # Signal A — traditional variance signal for runs like 3,4,2 (mixed
+        # LONG chunks that don't segment cleanly).
+        avg_len = sum(lengths) / len(lengths)
+        var_len = sum((l - avg_len) ** 2 for l in lengths) / len(lengths)
+        var_cost = min(1.0, var_len / 3.0) * 0.7
+
+        # Signal B — short-run mixing where length-3 chunks appear amongst
+        # 1s and 2s. Pure 1-2 patterns (KDKDKKDK, common in fast streams) are
+        # predictable and NOT KDDK-hostile; the friction comes from length-3
+        # spikes breaking the dominant-hand chunking. Blue Army sits on this
+        # exact pattern: runs of 1s, 2s, and occasional 3s intermixing.
+        short_mix_cost = 0.0
+        three_count = sum(1 for l in lengths if l == 3)
+        if max(lengths) <= 3 and three_count >= 1 and len(distinct) >= 2:
+            # More length-3 spikes AND more distinct lengths = worse.
+            short_mix_cost = min(1.0, 0.30 + 0.08 * (len(distinct) - 2) + 0.10 * three_count) * 0.55
+
+        misalign[i] = max(misalign[i], max(var_cost, short_mix_cost) * tempo_factor)
 
     # --- combine ---------------------------------------------------------
     per_note = tuple(min(1.0, mono[i] + big[i] + misalign[i]) for i in range(n))

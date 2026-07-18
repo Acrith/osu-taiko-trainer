@@ -127,12 +127,10 @@ def _raw_gimmick(f: MapFeatures) -> float:
 
 
 def _raw_technical(f: MapFeatures) -> float:
-    # Technical difficulty is about the SPECIFIC PRESENCE of hard rhythmic
-    # divisors (1/6, 1/3, 1/12) mixing with 1/4 streams — NOT Shannon entropy
-    # of the divisor distribution. Shannon entropy is high for balanced maps
-    # like Dynasty (45% 1/4 + 46% 1/2 = balanced but easy to play), and low
-    # for stream-dominant maps like Sonatina (71% 1/4 + 8% 1/6 = harder despite
-    # unbalanced). Rhythmic hardness is what matters, not distribution balance.
+    # Technical difficulty for KDDK players comes from THREE sources: hard
+    # rhythmic divisors mixing with 1/4 streams, hard-rhythm-switch transitions,
+    # and pattern-parity friction (short-run mixing and mono runs that don't
+    # segment into 4-note chunks the dominant hand can lead).
     tech_div_share = (
         f.rhythm.divisor_share.get("1/6", 0.0)
         + f.rhythm.divisor_share.get("1/8", 0.0)
@@ -150,7 +148,23 @@ def _raw_technical(f: MapFeatures) -> float:
     offgrid_n = _norm_up(f.rhythm.off_grid_ratio, 0.0, 0.04)
     # Moderate-BPM boost — technical maps are rarely 250 BPM speed monsters.
     low_bpm_boost = _norm(220 - f.movement.bpm_max, 30, 90)
-    return 40 * tech_div_n + 25 * q_n + 15 * trans_n + 10 * offgrid_n + 10 * low_bpm_boost
+
+    # KDDK pattern-parity: the mean per-note parity score is the map-wide
+    # hostility budget. Blue Army's short-run mixing rides on this, Sonatina's
+    # long mono runs + 1/6 does too.
+    parity_n = _norm_up(f.parity.mean, 0.05, 0.30)
+
+    # Total budget kept at 100 so overall magnitudes don't inflate 1.5x from
+    # the parity add; parity takes 20 units by trimming the pure-rhythm terms
+    # (tech_div 40 -> 30, q 25 -> 20, transitions unchanged).
+    return (
+        30 * tech_div_n
+        + 20 * q_n
+        + 15 * trans_n
+        + 10 * offgrid_n
+        + 5 * low_bpm_boost
+        + 20 * parity_n
+    )
 
 
 def _raw_consistency(f: MapFeatures) -> float:
