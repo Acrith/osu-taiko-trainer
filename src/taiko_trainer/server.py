@@ -485,11 +485,16 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .replay-tabs .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
 .replay-search { font-family: var(--font-mono); font-size: 12px; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 3px; background: var(--ground); color: var(--ink); flex: 1; min-width: 180px; max-width: 280px; }
 .replay-search:focus { outline: none; border-color: var(--accent); }
-.forecast-scroll { max-height: 640px; overflow-y: auto; padding-right: 6px; }
+.forecast-scroll { max-height: 380px; overflow-y: auto; padding-right: 6px; }
 .forecast-scroll::-webkit-scrollbar { width: 8px; }
 .forecast-scroll::-webkit-scrollbar-track { background: var(--panel); }
 .forecast-scroll::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 4px; }
 .forecast-grid { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); }
+.target-cell { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.target-cell .target-acc { font-size: 9px; letter-spacing: 0.08em; color: var(--ink-faint); text-transform: uppercase; }
+.target-cell .target-gain-pos { font-size: 13px; color: var(--great); font-weight: 500; font-variant-numeric: tabular-nums; }
+.target-cell .target-gain-none { font-size: 13px; color: var(--ink-faint); }
+.target-empty { color: var(--ink-faint); font-size: 13px; }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
 .forecast-row:last-child { border-bottom: none; }
 .forecast-header { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); border-bottom: 1px solid var(--rule); }
@@ -1819,46 +1824,63 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
     d = skill.as_dict()
     val = d[dim]
 
-    # For each contributor, compute the potential gain if you improved that
-    # play to specific accuracy targets — quick "what's the ROI of grinding
-    # THIS map to a better score" answer.
+    # Accuracy ladder — targets get finer-grained as you approach SS.
+    _ACC_LADDER = (0.92, 0.94, 0.95, 0.96, 0.97, 0.98, 0.985, 0.99, 0.9925, 0.995, 1.0)
+
+    def _next_targets(cur_acc):
+        """Next 3 ladder rungs strictly above the current accuracy."""
+        return tuple(x for x in _ACC_LADDER if x > cur_acc + 0.0005)[:3]
+
     def _potential_gain(c, i, target_acc):
         cur_scale = _accuracy_scaling(c.accuracy)
         tgt_scale = _accuracy_scaling(target_acc)
         if tgt_scale <= cur_scale:
             return 0.0
         weight = _DECAY ** i
-        cur_contrib = c.raw_rating * cur_scale * weight
-        new_contrib = c.raw_rating * tgt_scale * weight
-        return new_contrib - cur_contrib
+        return c.raw_rating * (tgt_scale - cur_scale) * weight
+
+    def _fmt_target_cell(c, i, target):
+        if target is None:
+            return '<span class="tr"><span class="target-empty">—</span></span>'
+        acc_pct = "SS" if target >= 1.0 else f"{target*100:.2f}%".rstrip("0").rstrip(".")
+        gain = _potential_gain(c, i, target)
+        if gain < 0.5:
+            gain_html = '<span class="target-gain-none">—</span>'
+        else:
+            gain_html = f'<span class="target-gain-pos">+{gain:.0f}</span>'
+        return f'<span class="tr target-cell"><span class="target-acc">{acc_pct}</span>{gain_html}</span>'
 
     contribs_html = ""
     if contribs:
         header = (
-            f'<div class="forecast-row forecast-header">'
-            f'<span></span><span>map</span>'
-            f'<span class="tr">current</span>'
-            f'<span class="tr">at 98%</span>'
-            f'<span class="tr">at 99%</span>'
-            f'<span class="tr">SS</span>'
-            f'</div>'
+            '<div class="forecast-row forecast-header">'
+            '<span></span><span>map</span>'
+            '<span class="tr">current</span>'
+            '<span class="tr">next</span>'
+            '<span class="tr">→</span>'
+            '<span class="tr">→</span>'
+            '</div>'
         )
-        rows = "".join(
-            f'<div class="forecast-row">'
-            f'<span class="contrib-meta">#{i+1}</span>'
-            f'<a href="/replay/{player}/{c.replay_id}" class="contrib-map">{c.map_title} <span class="muted">[{c.map_diff}]</span><br><span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.1f}%</span></a>'
-            f'<span class="tr contrib-val">{c.weighted:.0f}</span>'
-            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 0.98))}</span>'
-            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 0.99))}</span>'
-            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 1.00))}</span>'
-            f'</div>'
-            for i, c in enumerate(contribs)
-        )
+        parts = []
+        for i, c in enumerate(contribs):
+            targets = _next_targets(c.accuracy)
+            padded = tuple(targets) + (None,) * (3 - len(targets))
+            parts.append(
+                f'<div class="forecast-row">'
+                f'<span class="contrib-meta">#{i+1}</span>'
+                f'<a href="/replay/{player}/{c.replay_id}" class="contrib-map">{c.map_title} <span class="muted">[{c.map_diff}]</span><br><span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.2f}%</span></a>'
+                f'<span class="tr contrib-val">{c.weighted:.0f}</span>'
+                f'{_fmt_target_cell(c, i, padded[0])}'
+                f'{_fmt_target_cell(c, i, padded[1])}'
+                f'{_fmt_target_cell(c, i, padded[2])}'
+                f'</div>'
+            )
+        rows = "".join(parts)
         n_shown = len(contribs)
         contribs_html = (
             f'<section class="card"><h2>What drove your {dim} = {val:.0f}</h2>'
-            f'<p class="hint">weighted top-K aggregation from your play history ({n_shown} contributors). '
-            f'Right columns show the potential gain per play — grind the ones with the biggest deltas.</p>'
+            f'<p class="hint">weighted top-K aggregation ({n_shown} contributors). '
+            f'Right columns show the next accuracy breakpoints above your current — and the gain you\'d earn from hitting each.</p>'
             f'<div class="forecast-scroll"><div class="forecast-grid">{header}{rows}</div></div>'
             f'</section>'
         )
