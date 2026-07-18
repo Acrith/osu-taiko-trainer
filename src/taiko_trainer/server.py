@@ -498,6 +498,7 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .target-cell .target-gain-ss { font-size: 13px; }
 .target-cell-empty { }
 .forecast-row .tr.target-ceiling { font-size: 12px; color: var(--great); font-style: italic; text-align: center; }
+.forecast-row .tr.target-ceiling-ss { color: #d4af37; font-weight: 700; text-shadow: 0 0 6px rgba(212, 175, 55, 0.35); }
 .forecast-header { position: sticky; top: 0; background: var(--panel); z-index: 2; }
 .forecast-row .tr.forecast-improved-hdr { text-align: center; }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
@@ -1879,11 +1880,13 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
                 useful.append((None, 0.0))
             if not any(g >= 0.5 for t, g in paired):
                 if c.accuracy >= 0.9999:
-                    note = 'already <span class="target-gain-ss">SS</span>'
+                    ceiling_cls = "target-ceiling target-ceiling-ss"
+                    note = "already SS"
                 else:
-                    note = '<span class="target-gain-ss">SS</span> gain rounds to 0 at this rank'
+                    ceiling_cls = "target-ceiling"
+                    note = "SS gain rounds to 0 at this rank"
                 cells_html = (
-                    f'<span class="tr target-ceiling" style="grid-column: span 3;">'
+                    f'<span class="tr {ceiling_cls}" style="grid-column: span 3;">'
                     f'{note}'
                     f'</span>'
                 )
