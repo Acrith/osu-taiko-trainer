@@ -49,7 +49,9 @@ class PlayerSkill:
 
 
 _ACC_FLOOR = 0.85    # below this, replay contributes 0
-_ACC_CEIL = 0.995   # above this, full credit
+_ACC_CEIL = 1.0      # SS is the only "full credit" tier; 99.5% now gets slightly
+                     # less so perfection is rewarded (real osu! pp gives SS a
+                     # ~7% edge over 99.5%; our sqrt curve gives ~1.7%).
 _DECAY = 0.9         # weight decay per rank in top-K sum
 
 
