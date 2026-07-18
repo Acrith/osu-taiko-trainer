@@ -127,8 +127,74 @@ def _resolve_map(
                 catalog.close()
                 return content, _parse_bytes_as_osu(content), cand
 
+    # osu! API fallback — only if the workspace has OAuth credentials saved.
+    from . import osu_api
+    if osu_api.is_configured(catalog):
+        _report("api_lookup", note=f"asking osu! API for map md5 {target_md5[:8]}...")
+        try:
+            lookup = osu_api.lookup_beatmap(catalog, target_md5)
+        except osu_api.OsuApiError as e:
+            _report("api_error", note=str(e)[:120])
+            lookup = None
+        if lookup and lookup.beatmapset_id:
+            _report("api_download", note=f"downloading set {lookup.beatmapset_id} ({lookup.title})")
+            try:
+                osz_bytes = osu_api.download_osz(lookup.beatmapset_id)
+            except osu_api.OsuApiError as e:
+                _report("api_error", note=str(e)[:120])
+                osz_bytes = None
+            if osz_bytes:
+                files = osu_api.extract_osu_files_from_osz(osz_bytes)
+                # Find the exact match by MD5.
+                content = None
+                for member_content in files.values():
+                    if hashlib.md5(member_content).hexdigest().lower() == target_md5:
+                        content = member_content
+                        break
+                if content:
+                    _report("api_hit", note=f"got '{lookup.title} [{lookup.version}]' + {len(files)-1} sibling(s)")
+                    # Ingest ALL sibling .osu files right here — we already
+                    # have them in memory. No further filesystem scan needed.
+                    _ingest_maps_from_memory(catalog, files, exclude_md5=target_md5,
+                                             progress_cb=progress_cb)
+                    catalog.close()
+                    return content, _parse_bytes_as_osu(content), None
+
     catalog.close()
     return None, None, None
+
+
+def _ingest_maps_from_memory(
+    catalog,
+    files: dict[str, bytes],
+    exclude_md5: str,
+    progress_cb=None,
+) -> int:
+    """Ingest .osu files whose bytes we already have in memory (typically an
+    unpacked .osz downloaded from a mirror). Skips the played diff (excluded
+    by MD5) and any duplicate already in catalog.
+
+    Takes an open catalog connection — caller is responsible for closing."""
+    def _report(stage, total=None, done=None, note=""):
+        if progress_cb: progress_cb(stage=stage, total=total, done=done, note=note)
+    added = 0
+    items = list(files.items())
+    for i, (name, content) in enumerate(items):
+        _report("ingest_siblings", total=len(items), done=i, note=name)
+        md5 = hashlib.md5(content).hexdigest()
+        if md5 == exclude_md5 or get_map(catalog, md5):
+            continue
+        try:
+            bm = _parse_bytes_as_osu(content)
+        except Exception:
+            continue
+        if bm.mode != 1:
+            continue
+        feats = extract_features(bm)
+        rating = rate_map(feats)
+        upsert_map(catalog, bm, feats, rating, content)
+        added += 1
+    return added
 
 
 def _ingest_sibling_maps(

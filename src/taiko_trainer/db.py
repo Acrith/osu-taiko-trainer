@@ -262,6 +262,25 @@ def upsert_map(
     conn.commit()
 
 
+def get_catalog_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    """Read a key from catalog_meta (workspace-level config)."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    row = conn.execute(
+        f"SELECT value FROM {schema}.catalog_meta WHERE key = ?", (key,)
+    ).fetchone()
+    return row["value"] if row else None
+
+
+def set_catalog_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    conn.execute(
+        f"INSERT INTO {schema}.catalog_meta (key, value, updated_at) VALUES (?, ?, ?) "
+        f"ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (key, value, _now()),
+    )
+    conn.commit()
+
+
 def _has_attached_catalog(conn: sqlite3.Connection) -> bool:
     for row in conn.execute("PRAGMA database_list"):
         if row["name"] == "catalog":

@@ -61,6 +61,10 @@ _STAGE_LABELS = {
     "search_scan":    ("Enumerating map roots", 15),
     "search_hash":    ("Searching for map",    "dynamic"),   # 15..70 based on done/total
     "search_hit":     ("Map found",            70),
+    "api_lookup":     ("Looking up map on osu! API", 40),
+    "api_download":   ("Downloading .osz from mirror", 50),
+    "api_hit":        ("osu! API resolved the map", 65),
+    "api_error":      ("osu! API failed",       60),
     "rate_map":       ("Computing map rating", 75),
     "ingest_siblings":("Scanning sibling difficulties", 77),
     "siblings_done":  ("Siblings added",       78),
@@ -102,10 +106,10 @@ def create_app(workspace: str) -> FastAPI:
     # --- HTML pages ------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
-    def home():
+    def home(request: Request):
+        from . import osu_api
         ws_stats = workspace_status(workspace)
         players_info = []
-        # For each discovered player, get their name + style + replay count.
         for player_name, s in ws_stats["players"].items():
             players_info.append({
                 "name": player_name,
@@ -113,7 +117,6 @@ def create_app(workspace: str) -> FastAPI:
                 "replays": s["replays"],
             })
         catalog_stats = ws_stats["catalog"]
-        # Aggregate root list from ALL player DBs, deduped.
         roots_set: set[str] = set()
         for name in ws_stats["players"]:
             conn = open_plays(workspace, name)
@@ -121,7 +124,15 @@ def create_app(workspace: str) -> FastAPI:
                 roots_set.add(r)
             conn.close()
         roots = sorted(roots_set)
-        return _render_home(workspace, catalog_stats, players_info, roots)
+        # Check osu! API configuration status
+        cat = open_catalog(workspace)
+        api_configured = osu_api.is_configured(cat)
+        cat.close()
+        flash_ok = request.query_params.get("ok", "")
+        flash_err = request.query_params.get("err", "")
+        return _render_home(workspace, catalog_stats, players_info, roots,
+                            api_configured=api_configured,
+                            flash_ok=flash_ok, flash_err=flash_err)
 
     @app.get("/player/{name}", response_class=HTMLResponse)
     def player_page(name: str):
@@ -361,6 +372,21 @@ def create_app(workspace: str) -> FastAPI:
         conn.close()
         return RedirectResponse(url="/", status_code=303)
 
+    @app.post("/settings/osu-api")
+    async def save_osu_api(client_id: str = Form(...), client_secret: str = Form(...)):
+        from . import osu_api
+        catalog = open_catalog(workspace)
+        try:
+            osu_api.save_credentials(catalog, client_id, client_secret)
+            # Try to mint a token now so the user gets immediate feedback.
+            osu_api._get_token(catalog)
+            msg = "?ok=osu-api-configured"
+        except Exception as e:
+            msg = f"?err=osu-api-invalid:{str(e)[:80]}"
+        finally:
+            catalog.close()
+        return RedirectResponse(url="/" + msg, status_code=303)
+
     # --- JSON API ---------------------------------------------------
 
     @app.get("/api/status")
@@ -485,6 +511,18 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-map .muted { color: var(--ink-faint); }
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
+/* --- osu! API status card --- */
+.api-status { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 4px; font-family: var(--font-mono); font-size: 13px; }
+.api-status.connected { background: rgba(74, 119, 82, 0.14); border: 1px solid var(--great); color: var(--ink); }
+.api-status.disconnected { background: rgba(176, 138, 43, 0.10); border: 1px solid var(--ok); color: var(--ink); }
+.api-status .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.api-status.connected .dot { background: var(--great); box-shadow: 0 0 8px rgba(74, 119, 82, 0.5); }
+.api-status.disconnected .dot { background: var(--ok); }
+.flash { padding: 10px 14px; border-radius: 4px; font-family: var(--font-mono); font-size: 12px; margin-bottom: 12px; }
+.flash-ok { background: rgba(74, 119, 82, 0.16); border: 1px solid var(--great); color: var(--great); }
+.flash-err { background: var(--accent-faint); border: 1px solid var(--accent-soft); color: var(--accent); }
+code { font-family: var(--font-mono); font-size: 12px; background: var(--ground); padding: 1px 5px; border-radius: 3px; color: var(--ink); }
+
 /* --- timing histogram --- */
 .timing-hist-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--rule); }
 .timing-hist { width: 100%; max-width: 720px; height: auto; display: block; margin: 0 auto; }
@@ -1258,7 +1296,8 @@ def _html_page(title: str, body: str, active: str = "") -> str:
 </body></html>"""
 
 
-def _render_home(workspace: str, catalog_stats: dict, players: list[dict], roots: list[str]) -> str:
+def _render_home(workspace: str, catalog_stats: dict, players: list[dict], roots: list[str],
+                 api_configured: bool = False, flash_ok: str = "", flash_err: str = "") -> str:
     stats = {"catalog maps": catalog_stats.get("maps", 0), "players": len(players)}
     stats_html = "".join(
         f'<div class="stat"><span class="k">{k}</span><span class="v">{v}</span></div>'
@@ -1311,14 +1350,72 @@ def _render_home(workspace: str, catalog_stats: dict, players: list[dict], roots
   <section>
     <h2>Add a replay</h2>
     <form class="upload" method="post" action="/upload" enctype="multipart/form-data">
-      <p class="hint">Drop a .osr file (and optionally a matching .osu). If the map is already in the DB or under a configured root, we'll resolve it automatically.</p>
+      <p class="hint">Drop a .osr file (and optionally a matching .osu). If the map is already in the DB, under a configured root, or resolvable via the osu! API, we'll fetch it automatically.</p>
       <input type="file" name="file" accept=".osr" required>
       <input type="file" name="map_file" accept=".osu">
       <button type="submit">Upload &amp; analyze</button>
     </form>
   </section>
+
+  {_render_osu_api_card(api_configured, flash_ok, flash_err)}
 """
     return _html_page("Home", body, active="home")
+
+
+def _render_osu_api_card(configured: bool, flash_ok: str, flash_err: str) -> str:
+    """Show osu! API OAuth status + setup form."""
+    banner = ""
+    if flash_ok == "osu-api-configured":
+        banner = '<div class="flash flash-ok">✓ osu! API credentials saved and validated.</div>'
+    elif flash_err.startswith("osu-api-invalid:"):
+        banner = f'<div class="flash flash-err">✗ Could not validate credentials: {flash_err[len("osu-api-invalid:"):]}</div>'
+
+    if configured:
+        status = (
+            '<div class="api-status connected">'
+            '<span class="dot"></span>'
+            '<span>Connected — replays whose maps aren\'t local will auto-fetch from the osu! API + mirror.</span>'
+            '</div>'
+        )
+        form = ""
+        expand_note = '<p class="hint" style="margin-top: 10px;">To re-enter credentials, expand the form below.</p>'
+        form = f"""
+        <details style="margin-top: 12px;">
+          <summary class="hint" style="cursor: pointer;">Update credentials</summary>
+          {_render_osu_api_form()}
+        </details>
+        """
+    else:
+        status = (
+            '<div class="api-status disconnected">'
+            '<span class="dot"></span>'
+            '<span>Not configured — uploads that need a map missing from your Songs folder will fail.</span>'
+            '</div>'
+        )
+        form = _render_osu_api_form()
+
+    return f"""
+  <section class="card">
+    <h2>osu! API integration</h2>
+    {banner}
+    {status}
+    <p class="hint" style="margin-top: 10px;">
+      One-time setup: go to
+      <a href="https://osu.ppy.sh/home/account/edit" target="_blank" rel="noopener">osu.ppy.sh/home/account/edit</a>
+      → OAuth → New OAuth Application. Any Application Name and Callback URL <code>http://localhost:8000</code>. Copy the <b>Client ID</b> and <b>Client Secret</b> here.
+    </p>
+    {form}
+  </section>"""
+
+
+def _render_osu_api_form() -> str:
+    return """
+      <form class="inline-form" method="post" action="/settings/osu-api" style="flex-direction: column; align-items: stretch; gap: 8px;">
+        <input type="text" name="client_id" placeholder="Client ID (number)" required>
+        <input type="password" name="client_secret" placeholder="Client Secret" required>
+        <button type="submit" style="align-self: flex-start;">Save &amp; validate</button>
+      </form>
+    """
 
 
 def _render_report(report, replays: list[dict] | None = None, player_name: str | None = None) -> str:
