@@ -589,6 +589,19 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .row-link-muted { display: inline-block; padding: 2px 6px; margin: 0 2px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); opacity: 0.4; }
 td.links { text-align: right; white-space: nowrap; }
 th.links-col { text-align: right; }
+/* skill progression small multiples */
+.prog-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 4px; }
+@media (max-width: 900px) { .prog-grid { grid-template-columns: repeat(2, 1fr); } }
+.prog-cell { display: flex; flex-direction: column; gap: 4px; padding: 8px 6px; border: 1px solid var(--rule); border-radius: 4px; background: var(--panel); }
+.prog-title { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); text-align: center; }
+.prog-chart { width: 100%; height: 88px; display: block; }
+.prog-footer { display: flex; justify-content: space-between; align-items: baseline; padding: 0 4px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.prog-current { font-size: 16px; font-weight: 500; color: var(--ink); }
+.prog-delta { font-size: 11px; letter-spacing: 0.04em; }
+.prog-delta.up { color: var(--great); }
+.prog-delta.down { color: var(--miss); }
+.prog-delta.flat { color: var(--ink-faint); }
+
 /* floating upload tray (bottom-right) */
 #uploads-tray { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column-reverse; gap: 10px; z-index: 999; pointer-events: none; }
 .upload-toast { pointer-events: auto; width: 320px; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.35); font-family: var(--font-mono); animation: ut-in 0.25s ease-out; }
@@ -1148,6 +1161,8 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
     {dim_bars}
   </section>
 
+  {_render_progression_chart(getattr(report, "snapshot_history", ()))}
+
   {sess_html}
 
   <section class="card">
@@ -1457,6 +1472,87 @@ def _render_inspector(row: dict, player: str, judged, replay) -> str:
   </script>
 """
     return _html_page(f"inspect #{row['id']}", body)
+
+
+_PROGRESSION_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency")
+
+def _render_progression_chart(history: tuple) -> str:
+    """5 small multiples of the skill vector across sessions. Each dimension
+    gets its own y-scale so a weak dim isn't crushed by a strong one."""
+    history = list(history)
+    if len(history) < 2:
+        return (
+            '<section class="card"><h2>Skill progression</h2>'
+            '<p class="hint">need at least two training sessions to plot a trend — come back after your next play session.</p>'
+            '</section>'
+        )
+
+    n = len(history)
+    W, H = 240, 88  # per-chart dimensions
+    pad_l, pad_r, pad_t, pad_b = 8, 8, 6, 18
+
+    def _fmt_date(iso: str) -> str:
+        # "2026-07-18T15:34:23..." → "07-18"
+        return iso[5:10]
+
+    columns = []
+    for dim in _PROGRESSION_DIMS:
+        vals = [s[f"skill_{dim}"] for s in history]
+        vmax = max(vals) or 1
+        vmin = min(vals)
+        # Pad the y-range 5% either side so lines don't touch the edges,
+        # and lock the axis to zero at the bottom if the whole trace sits
+        # near zero (weak dim) so growth reads clearly.
+        span = max(vmax - vmin, 1.0)
+        y_lo = max(0, vmin - span * 0.15)
+        y_hi = vmax + span * 0.15
+        y_range = y_hi - y_lo or 1
+
+        # Compute point coordinates in SVG space.
+        def sx(i): return pad_l + (W - pad_l - pad_r) * (i / max(1, n - 1))
+        def sy(v): return pad_t + (H - pad_t - pad_b) * (1 - (v - y_lo) / y_range)
+
+        pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(vals))
+        dots = "".join(
+            f'<circle cx="{sx(i):.1f}" cy="{sy(v):.1f}" r="2.5" fill="var(--accent)"/>'
+            for i, v in enumerate(vals)
+        )
+        # Area fill under the line (subtle).
+        area = f"M{sx(0):.1f},{pad_t + (H - pad_t - pad_b):.1f} L" + \
+               " L".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(vals)) + \
+               f" L{sx(n-1):.1f},{pad_t + (H - pad_t - pad_b):.1f} Z"
+
+        current = vals[-1]
+        first = vals[0]
+        delta = current - first
+        delta_class = "up" if delta > 0.5 else ("down" if delta < -0.5 else "flat")
+        delta_str = (f"+{delta:.0f}" if delta > 0 else f"{delta:.0f}") if abs(delta) >= 0.5 else "·"
+
+        columns.append(f"""
+        <div class="prog-cell">
+          <div class="prog-title">{dim}</div>
+          <svg class="prog-chart" viewBox="0 0 {W} {H}" preserveAspectRatio="none">
+            <path d="{area}" fill="var(--accent)" opacity="0.08"/>
+            <polyline points="{pts}" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/>
+            {dots}
+          </svg>
+          <div class="prog-footer">
+            <span class="prog-current">{current:.0f}</span>
+            <span class="prog-delta {delta_class}">{delta_str}</span>
+          </div>
+        </div>""")
+
+    first_date = _fmt_date(history[0]["latest_replay_played_at"])
+    last_date = _fmt_date(history[-1]["latest_replay_played_at"])
+
+    return f"""
+  <section class="card">
+    <h2>Skill progression <span class="hint" style="font-size: 12px; font-weight: 400; margin-left: 8px;">across {n} sessions ({first_date} → {last_date})</span></h2>
+    <div class="prog-grid">
+      {"".join(columns)}
+    </div>
+    <p class="hint" style="margin-top: 14px;">delta = latest − oldest session in this window</p>
+  </section>"""
 
 
 _DIM_TAGLINE = {

@@ -48,6 +48,7 @@ class TrainingReport:
     latest_session: Session | None
     previous_session: Session | None
     dim_contributors: dict[str, tuple[SkillContribution, ...]] = None  # top-5 per dim
+    snapshot_history: tuple[dict, ...] = ()  # snapshots oldest -> newest for the progression chart
 
 
 def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingReport | None:
@@ -115,6 +116,12 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
         }
         prev_snapshot_at = prev["latest_replay_played_at"]
 
+    # Full snapshot history (up to 30 sessions) — chart data.
+    # Order by when you actually played (latest_replay_played_at), not when the
+    # snapshot was computed, so a re-uploaded old replay doesn't jump to the end.
+    full_history = get_snapshot_history(conn, limit=30)
+    snapshot_history = tuple(sorted(full_history, key=lambda s: s["latest_replay_played_at"]))
+
     return TrainingReport(
         player=player,
         style=style,
@@ -131,6 +138,7 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
         latest_session=latest_session,
         previous_session=previous_session,
         dim_contributors=_compute_dim_contributors(replays),
+        snapshot_history=snapshot_history,
     )
 
 
