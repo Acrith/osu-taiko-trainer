@@ -491,14 +491,15 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .forecast-scroll::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 4px; }
 .forecast-grid { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); }
 .target-cell { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.target-cell .target-acc { font-size: 9px; letter-spacing: 0.08em; color: var(--ink-faint); text-transform: uppercase; }
-.target-cell .target-acc-ss { color: #d4af37; font-weight: 700; letter-spacing: 0.12em; }
-.target-cell .target-gain-pos { font-size: 13px; color: var(--great); font-weight: 400; font-variant-numeric: tabular-nums; }
-.target-cell .target-gain-ss { font-size: 13px; color: #d4af37; font-weight: 700; font-variant-numeric: tabular-nums; text-shadow: 0 0 6px rgba(212, 175, 55, 0.35); }
+.target-acc { font-size: 9px; letter-spacing: 0.08em; color: var(--ink-faint); text-transform: uppercase; }
+.target-acc-ss { color: #d4af37 !important; font-weight: 700; letter-spacing: 0.12em; }
+.target-gain-pos { font-size: 13px; color: var(--great); font-weight: 400; font-variant-numeric: tabular-nums; }
+.target-gain-ss { color: #d4af37 !important; font-weight: 700; font-variant-numeric: tabular-nums; text-shadow: 0 0 6px rgba(212, 175, 55, 0.35); }
+.target-cell .target-gain-ss { font-size: 13px; }
 .target-cell-empty { }
-.forecast-row .target-ceiling { font-size: 12px; color: var(--great); font-style: italic; text-align: center; }
+.forecast-row .tr.target-ceiling { font-size: 12px; color: var(--great); font-style: italic; text-align: center; }
 .forecast-header { position: sticky; top: 0; background: var(--panel); z-index: 2; }
-.forecast-row .forecast-improved-hdr { text-align: center; }
+.forecast-row .tr.forecast-improved-hdr { text-align: center; }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
 .forecast-row:last-child { border-bottom: none; }
 .forecast-header { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); border-bottom: 1px solid var(--rule); }
