@@ -12,6 +12,7 @@ import math
 from collections import Counter
 from dataclasses import asdict, dataclass
 
+from .kddk_patterns import StreamProfile, stream_profile
 from .models import HitObject, NoteType, TaikoBeatmap
 from .parity import ParityProfile, compute_parity
 
@@ -789,6 +790,7 @@ class MapFeatures:
     segments: SegmentProfile
     strain: StrainProfile
     parity: ParityProfile
+    streams: "StreamProfile"
 
     # Convenience roll-ups for headline stats:
     total_notes: int
@@ -809,6 +811,7 @@ class MapFeatures:
             "gimmick": asdict(self.gimmick),
             "segments": asdict(self.segments),
             "strain": asdict(self.strain),
+            "streams": asdict(self.streams),
             "total_notes": self.total_notes,
             "hittable_notes": self.hittable_notes,
             "drumroll_notes": self.drumroll_notes,
@@ -830,6 +833,7 @@ def extract_features(beatmap: TaikoBeatmap) -> MapFeatures:
     segments = segment_profile(hittable, n_segments=10)
     strain = strain_profile(hittable)
     parity = compute_parity(hittable)
+    streams = stream_profile(hittable)
 
     drumrolls = sum(
         1 for n in beatmap.hit_objects
@@ -850,6 +854,7 @@ def extract_features(beatmap: TaikoBeatmap) -> MapFeatures:
         segments=segments,
         strain=strain,
         parity=parity,
+        streams=streams,
         total_notes=len(beatmap.hit_objects),
         hittable_notes=len(hittable),
         drumroll_notes=drumrolls,

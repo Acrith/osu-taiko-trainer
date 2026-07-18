@@ -1819,13 +1819,15 @@ def _render_features_panel(f) -> str:
     </div>
 
     <div class="feat-group">
-      <div class="feat-title"><span>technical</span><span class="feat-val">mono max {c.run_length_max} · 1/6 share {r.divisor_share.get('1/6', 0)*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">mono-run max</span><span class="v">{c.run_length_max}</span></div>
-      <div class="feat-row"><span class="k">mono-run mean</span><span class="v">{c.run_length_mean:.1f}</span></div>
-      <div class="feat-row"><span class="k">mono-stream ratio</span><span class="v">{c.mono_stream_ratio*100:.0f}%</span></div>
+      <div class="feat-title"><span>technical</span><span class="feat-val">streams {f.streams.stream_count} · longest {f.streams.longest_stream} · hostile-long {f.streams.hostile_long_count}</span></div>
+      <div class="feat-row"><span class="k">stream count</span><span class="v">{f.streams.stream_count}</span></div>
+      <div class="feat-row"><span class="k">longest stream</span><span class="v">{f.streams.longest_stream}</span></div>
+      <div class="feat-row"><span class="k">stream value (agg)</span><span class="v">{f.streams.stream_value:.1f}</span></div>
+      <div class="feat-row"><span class="k">hostile-long (≥61 & parity ≥.25)</span><span class="v">{f.streams.hostile_long_count}</span></div>
+      <div class="feat-row"><span class="k">top stream color</span><span class="v">{f.streams.top_stream_color:.3f}</span></div>
       <div class="feat-row"><span class="k">divisor mix</span><span class="v" style="font-size: 11px;">{div_row}</span></div>
+      <div class="feat-row"><span class="k">mono-run max</span><span class="v">{c.run_length_max}</span></div>
       <div class="feat-row"><span class="k">color-change ratio</span><span class="v">{c.color_change_ratio*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">don share</span><span class="v">{c.don_ratio*100:.0f}%</span></div>
     </div>
 
     <div class="feat-group">

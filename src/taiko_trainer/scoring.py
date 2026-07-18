@@ -127,10 +127,12 @@ def _raw_gimmick(f: MapFeatures) -> float:
 
 
 def _raw_technical(f: MapFeatures) -> float:
-    # Technical difficulty for KDDK players comes from THREE sources: hard
-    # rhythmic divisors mixing with 1/4 streams, hard-rhythm-switch transitions,
-    # and pattern-parity friction (short-run mixing and mono runs that don't
-    # segment into 4-note chunks the dominant hand can lead).
+    # Technical difficulty for KDDK players: hard rhythmic divisors + hard-
+    # rhythm-switch transitions + stream-based KDDK-hostility. The stream
+    # metric (see kddk_patterns.py) is the primary signal — it applies
+    # Alchyr-style per-transition color friction, length-weighted, and only
+    # to sustained fast streams. Patterns like The Fool's KDDDDD get crushed
+    # by same-parity + repetition decay so they don't inflate technical.
     tech_div_share = (
         f.rhythm.divisor_share.get("1/6", 0.0)
         + f.rhythm.divisor_share.get("1/8", 0.0)
@@ -139,8 +141,6 @@ def _raw_technical(f: MapFeatures) -> float:
     )
     tech_div_n = _norm(tech_div_share, 0.02, 0.15)
 
-    # Specific 1/4-1/6 and 1/4-1/3 transitions: the "hard rhythm switch" that
-    # forces the player to change rhythmic feel mid-stream.
     q_specific = f.transitions.quarter_sixth_transitions + f.transitions.quarter_third_transitions
     q_n = _norm(q_specific, 5, 100)
 
@@ -149,21 +149,24 @@ def _raw_technical(f: MapFeatures) -> float:
     # Moderate-BPM boost — technical maps are rarely 250 BPM speed monsters.
     low_bpm_boost = _norm(220 - f.movement.bpm_max, 30, 90)
 
-    # KDDK pattern-parity: the mean per-note parity score is the map-wide
-    # hostility budget. Blue Army's short-run mixing rides on this, Sonatina's
-    # long mono runs + 1/6 does too.
-    parity_n = _norm_up(f.parity.mean, 0.05, 0.30)
+    # Stream-based KDDK signal: aggregated length × parity friction. Blue Army
+    # rides on this (159-note streams of short-run mixing with high per-note
+    # color); The Fool's long streams are muscle-memory-locked KDDDDD which
+    # Alchyr's repetition decay crushes.
+    stream_n = _norm(f.streams.stream_value, 3, 60)
+    # Bonus: count of streams that are BOTH long (>=61 notes) AND KDDK-hostile
+    # (per-note color >=0.25). This is Blue Army's specific signature — 4 such
+    # streams on Blue Army INNER ONI, 0 on Fool despite similar length.
+    hostile_bonus = min(5.0, f.streams.hostile_long_count)
 
-    # Total budget kept at 100 so overall magnitudes don't inflate 1.5x from
-    # the parity add; parity takes 20 units by trimming the pure-rhythm terms
-    # (tech_div 40 -> 30, q 25 -> 20, transitions unchanged).
     return (
-        30 * tech_div_n
-        + 20 * q_n
-        + 15 * trans_n
-        + 10 * offgrid_n
+        25 * tech_div_n
+        + 18 * q_n
+        + 12 * trans_n
+        + 8 * offgrid_n
         + 5 * low_bpm_boost
-        + 20 * parity_n
+        + 32 * stream_n
+        + hostile_bonus
     )
 
 
