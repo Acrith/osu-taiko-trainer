@@ -473,7 +473,27 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 
 /* --- skill radar --- */
 .radar-wrap { display: flex; justify-content: center; padding: 8px 0 12px; }
-.radar { width: 100%; max-width: 500px; height: auto; }
+.radar { width: 100%; max-width: 620px; height: auto; }
+.replay-toolbar { display: flex; align-items: center; gap: 12px; margin: 8px 0 12px; flex-wrap: wrap; }
+.replay-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.replay-tabs .tab { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; background: transparent; color: var(--ink-muted); border: 1px solid var(--rule); border-radius: 999px; padding: 5px 12px; cursor: pointer; transition: all 0.15s; }
+.replay-tabs .tab:hover { color: var(--ink); border-color: var(--rule-strong); }
+.replay-tabs .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+.replay-search { font-family: var(--font-mono); font-size: 12px; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 3px; background: var(--ground); color: var(--ink); flex: 1; min-width: 180px; max-width: 280px; }
+.replay-search:focus { outline: none; border-color: var(--accent); }
+.forecast-grid { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); }
+.forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
+.forecast-row:last-child { border-bottom: none; }
+.forecast-header { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); border-bottom: 1px solid var(--rule); }
+.forecast-row .tr { text-align: right; }
+.forecast-row .fc-delta { font-size: 12px; }
+.forecast-row .contrib-map { color: var(--ink); text-decoration: none; font-size: 12px; }
+.forecast-row .contrib-map:hover { color: var(--accent); }
+.forecast-row .contrib-map .muted { color: var(--ink-faint); }
+.forecast-row .contrib-val { color: var(--ink); font-weight: 500; font-size: 14px; }
+.hero-skill-mini { grid-template-columns: repeat(5, 1fr) !important; }
+.hero-skill-mini .k { font-size: 8px !important; }
+.hero-skill-mini .v { font-size: 12px !important; }
 .radar-grid { fill: none; stroke: var(--rule); stroke-width: 1; opacity: 0.55; }
 .radar-axis { stroke: var(--rule); stroke-width: 1; opacity: 0.8; }
 .radar-skill { fill: var(--accent); fill-opacity: 0.22; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
@@ -766,8 +786,7 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
         <p class="hero-artist">training profile</p>
         <p class="hero-meta">{report.replays} replays  ·  {sess_count} sessions  ·  {unique_maps} unique maps{("  ·  latest " + latest_date) if latest_date else ""}</p>
         <div class="hero-actions">
-          <a class="hero-btn primary" href="/player/{player}/train/{report.weakest_dim}">Push {report.weakest_dim} →</a>
-          <a class="hero-btn" href="/">Home</a>
+          <a class="hero-btn" href="/">← Home</a>
         </div>
       </div>
       <div class="hero-right">
@@ -780,7 +799,7 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
           <div><span class="k ok">SS</span><span class="v">{ss_count}</span></div>
           <div><span class="k miss">misses</span><span class="v">{report.total_misses}</span></div>
         </div>
-        <div class="hero-mapinfo">
+        <div class="hero-mapinfo hero-skill-mini">
           <div><span class="k">speed</span><span class="v">{d['speed']:.0f}</span></div>
           <div><span class="k">stam</span><span class="v">{d['stamina']:.0f}</span></div>
           <div><span class="k">gim</span><span class="v">{d['gimmick']:.0f}</span></div>
@@ -802,8 +821,10 @@ def _render_skill_radar(report, player: str) -> str:
     d = report.skill.as_dict()
     max_val = max(d.values()) or 1
 
-    W, H = 460, 380
-    cx, cy = W / 2, H / 2 - 10
+    # Extra width on the sides so the "CONSISTENCY" label (11 chars) doesn't
+    # clip the leftmost boundary.
+    W, H = 620, 400
+    cx, cy = W / 2, H / 2 - 6
     r_max = 130
 
     # 5 axes at 72° intervals, SPEED at top
@@ -1338,7 +1359,7 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
         cheese_delta = _delta((latest.avg_cheese_rate - prev.avg_cheese_rate) * 100, "%", flip=(report.style == "kddk")) if prev else ""
         sess_html = f"""
     <div class="card">
-      <h2>Latest session <span style="color: var(--ink-muted); font-size: 12px; margin-left: 8px;">{latest.start[:16]}</span></h2>
+      <h2>Latest session <span style="color: var(--ink-muted); font-size: 12px; margin-left: 8px;">{latest.start[:16].replace("T", " ")}</span></h2>
       <div class="stats-row">
         <div class="stat"><span class="k">replays</span><span class="v">{len(latest.replays)}</span></div>
         <div class="stat"><span class="k">accuracy</span><span class="v">{latest.weighted_accuracy*100:.2f}%{acc_delta}</span></div>
@@ -1346,7 +1367,7 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
         <div class="stat"><span class="k">misses</span><span class="v">{latest.total_misses}</span></div>
         <div class="stat"><span class="k">cheese</span><span class="v">{latest.avg_cheese_rate*100:.2f}%{cheese_delta}</span></div>
       </div>
-      {"<p class='hint' style='margin-top: 12px;'>compared to session at " + prev.start[:16] + "</p>" if prev else ""}
+      {"<p class='hint' style='margin-top: 12px;'>compared to session at " + prev.start[:16].replace("T", " ") + "</p>" if prev else ""}
     </div>"""
 
     suggestions_html = ""
@@ -1387,11 +1408,6 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
   <section class="card">
     <h2>Dominant miss causes (all replays)</h2>
     {causes_html or "<p class='hint'>No classified misses.</p>"}
-  </section>
-
-  <section class="card">
-    <h2>Suggested maps to push {report.weakest_dim}</h2>
-    {suggestions_html or "<p class='hint'>No maps available.</p>"}
   </section>
 
   {_render_replays_table(replays or [], player_name or report.player)}
@@ -1774,6 +1790,12 @@ def _render_progression_chart(history: tuple) -> str:
   </section>"""
 
 
+def _fmt_gain(gain: float) -> str:
+    if gain < 0.5:
+        return '<span style="color: var(--ink-faint);">—</span>'
+    return f'<span style="color: var(--great);">+{gain:.0f}</span>'
+
+
 _DIM_TAGLINE = {
     "speed":       "motor tempo — how fast your hands alternate",
     "stamina":     "endurance — long high-density stretches without dropping",
@@ -1784,24 +1806,50 @@ _DIM_TAGLINE = {
 
 
 def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> str:
+    from .player import _accuracy_scaling, _DECAY
+
     d = skill.as_dict()
     val = d[dim]
 
+    # For each contributor, compute the potential gain if you improved that
+    # play to specific accuracy targets — quick "what's the ROI of grinding
+    # THIS map to a better score" answer.
+    def _potential_gain(c, i, target_acc):
+        cur_scale = _accuracy_scaling(c.accuracy)
+        tgt_scale = _accuracy_scaling(target_acc)
+        if tgt_scale <= cur_scale:
+            return 0.0
+        weight = _DECAY ** i
+        cur_contrib = c.raw_rating * cur_scale * weight
+        new_contrib = c.raw_rating * tgt_scale * weight
+        return new_contrib - cur_contrib
+
     contribs_html = ""
     if contribs:
+        header = (
+            f'<div class="forecast-row forecast-header">'
+            f'<span></span><span>map</span>'
+            f'<span class="tr">current</span>'
+            f'<span class="tr">at 99%</span>'
+            f'<span class="tr">at 99.5%</span>'
+            f'<span class="tr">SS</span>'
+            f'</div>'
+        )
         rows = "".join(
-            f'<div class="contrib-row" style="grid-template-columns: 24px 1fr max-content max-content;">'
+            f'<div class="forecast-row">'
             f'<span class="contrib-meta">#{i+1}</span>'
-            f'<a href="/replay/{player}/{c.replay_id}" class="contrib-map">{c.map_title} <span class="muted">[{c.map_diff}]</span></a>'
-            f'<span class="contrib-val">+{c.weighted:.0f}</span>'
-            f'<span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.1f}%</span>'
+            f'<a href="/replay/{player}/{c.replay_id}" class="contrib-map">{c.map_title} <span class="muted">[{c.map_diff}]</span><br><span class="contrib-meta">rating {c.raw_rating:.0f} · acc {c.accuracy*100:.1f}%</span></a>'
+            f'<span class="tr contrib-val">{c.weighted:.0f}</span>'
+            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 0.99))}</span>'
+            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 0.995))}</span>'
+            f'<span class="tr fc-delta">{_fmt_gain(_potential_gain(c, i, 1.00))}</span>'
             f'</div>'
             for i, c in enumerate(contribs)
         )
         contribs_html = (
             f'<section class="card"><h2>What drove your {dim} = {val:.0f}</h2>'
-            f'<p class="hint">weighted top-K aggregation from your play history</p>'
-            f'<div class="contrib-list" style="padding-left: 0;">{rows}</div>'
+            f'<p class="hint">weighted top-K aggregation from your play history. Right columns show the potential gain if you improved that specific play.</p>'
+            f'<div class="forecast-grid">{header}{rows}</div>'
             f'</section>'
         )
 
@@ -1843,10 +1891,11 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
 
 
 def _render_replays_table(replays: list[dict], player: str) -> str:
+    from .player import _accuracy_scaling
     if not replays:
         return ""
     rows = ""
-    for r in replays:
+    for idx, r in enumerate(replays):
         acc = (r.get("accuracy_judged") or 0) * 100
         misses = r.get("count_miss") or 0
         oks = r.get("count_ok") or 0
@@ -1867,8 +1916,23 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
         )
         osr_link = f'<a class="row-link" href="/replay/{player}/{r["id"]}/osr" title="download .osr (opens in osu! if installed)" download>.osr</a>'
         links_cell = f'<td class="links">{osu_link}  {osr_link}</td>'
+        # Per-dim contribution (rating × accuracy_scaling), used for sort.
+        acc_scale = _accuracy_scaling((r.get("accuracy_judged") or 0))
+        c_speed       = (r.get("rating_speed") or 0) * acc_scale
+        c_stamina     = (r.get("rating_stamina") or 0) * acc_scale
+        c_gimmick     = (r.get("rating_gimmick") or 0) * acc_scale
+        c_technical   = (r.get("rating_technical") or 0) * acc_scale
+        c_consistency = (r.get("rating_consistency") or 0) * acc_scale
+        # data-* used by client-side sort + filter
+        raw_played = (r.get("played_at") or "").replace("T", " ")
+        title_lc = title.lower() + " " + version.lower()
         rows += (
-            f'<tr class="row-nav" data-href="/replay/{player}/{r["id"]}" style="cursor:pointer">'
+            f'<tr class="row-nav replay-row" data-href="/replay/{player}/{r["id"]}" '
+            f'data-idx="{idx}" data-title="{title_lc}" data-date="{raw_played}" '
+            f'data-c-speed="{c_speed:.1f}" data-c-stamina="{c_stamina:.1f}" '
+            f'data-c-gimmick="{c_gimmick:.1f}" data-c-technical="{c_technical:.1f}" '
+            f'data-c-consistency="{c_consistency:.1f}" '
+            f'style="cursor:pointer">'
             f'<td class="name">{badge}{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span></td>'
             f'<td class="muted">{played}</td>'
             f'<td>{acc:.2f}%</td>'
@@ -1881,24 +1945,69 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
     return f"""
   <section class="card">
     <h2>Replays ({len(replays)})</h2>
-    <p class="hint">click a row to see the per-note breakdown  ·  osu! opens the beatmap page  ·  .osr downloads and opens in-game if installed</p>
-    <div style="overflow-x: auto; margin-top: 12px;">
-      <table>
+    <div class="replay-toolbar">
+      <div class="replay-tabs">
+        <button class="tab active" data-sort="date">Recent</button>
+        <button class="tab" data-sort="c-speed">Top speed</button>
+        <button class="tab" data-sort="c-stamina">Top stamina</button>
+        <button class="tab" data-sort="c-gimmick">Top gimmick</button>
+        <button class="tab" data-sort="c-technical">Top technical</button>
+        <button class="tab" data-sort="c-consistency">Top consistency</button>
+      </div>
+      <input type="search" class="replay-search" placeholder="filter map title…" aria-label="search replays">
+    </div>
+    <div style="overflow-x: auto;">
+      <table id="replay-table">
         <thead><tr>
           <th>map</th><th>played</th><th>acc</th><th>miss</th><th>Δ σ</th><th>cheese</th><th class="links-col">links</th>
         </tr></thead>
-        <tbody>{rows}</tbody>
+        <tbody id="replay-tbody">{rows}</tbody>
       </table>
     </div>
+    <p class="hint" style="margin-top: 8px;">click a row to see per-note breakdown  ·  osu! opens the beatmap page  ·  .osr downloads and opens in-game if installed</p>
     <script>
-      // Row navigation that respects link clicks: if the target is an <a>, let
-      // it work normally; otherwise navigate to the row's data-href.
-      document.querySelectorAll('.row-nav').forEach(tr => {{
-        tr.addEventListener('click', ev => {{
+      (function() {{
+        const tbody = document.getElementById('replay-tbody');
+        const originalOrder = Array.from(tbody.querySelectorAll('.replay-row'));
+        const search = document.querySelector('.replay-search');
+        const tabs = document.querySelectorAll('.replay-tabs .tab');
+
+        // Row navigation that respects link clicks.
+        tbody.addEventListener('click', ev => {{
+          const tr = ev.target.closest('.row-nav');
+          if (!tr) return;
           if (ev.target.closest('a')) return;
           window.location = tr.dataset.href;
         }});
-      }});
+
+        function apply(sortKey, filterText) {{
+          const rows = originalOrder.slice();
+          if (sortKey === 'date') {{
+            rows.sort((a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''));
+          }} else {{
+            rows.sort((a, b) => (parseFloat(b.dataset[toCamel(sortKey)] || 0)) - (parseFloat(a.dataset[toCamel(sortKey)] || 0)));
+          }}
+          const q = (filterText || '').toLowerCase().trim();
+          tbody.innerHTML = '';
+          for (const r of rows) {{
+            const matches = !q || r.dataset.title.includes(q);
+            r.style.display = matches ? '' : 'none';
+            tbody.appendChild(r);
+          }}
+        }}
+        function toCamel(s) {{ return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase()); }}
+
+        let currentSort = 'date';
+        tabs.forEach(t => {{
+          t.addEventListener('click', () => {{
+            tabs.forEach(x => x.classList.remove('active'));
+            t.classList.add('active');
+            currentSort = t.dataset.sort;
+            apply(currentSort, search.value);
+          }});
+        }});
+        search.addEventListener('input', () => apply(currentSort, search.value));
+      }})();
     </script>
   </section>"""
 
