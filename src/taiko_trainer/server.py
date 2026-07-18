@@ -501,6 +501,8 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .forecast-row .tr.target-ceiling-ss { color: #d4af37; font-weight: 700; text-shadow: 0 0 6px rgba(212, 175, 55, 0.35); }
 .forecast-header { position: sticky; top: 0; background: var(--panel); z-index: 2; }
 .forecast-row .tr.forecast-improved-hdr { text-align: center; }
+.forecast-row .tr.forecast-current-hdr { text-align: center; }
+.forecast-row .tr.contrib-val { text-align: center; }
 .forecast-row { display: grid; grid-template-columns: 24px 1fr 70px 70px 70px 70px; gap: 12px; padding: 8px 4px; align-items: center; border-bottom: 1px dashed var(--rule); font-variant-numeric: tabular-nums; }
 .forecast-row:last-child { border-bottom: none; }
 .forecast-header { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); border-bottom: 1px solid var(--rule); }
@@ -1864,7 +1866,7 @@ def _render_train_page(player: str, dim: str, skill, suggestions, contribs) -> s
         header = (
             '<div class="forecast-row forecast-header">'
             '<span></span><span>map</span>'
-            '<span class="tr">current</span>'
+            '<span class="tr forecast-current-hdr">current</span>'
             '<span class="tr forecast-improved-hdr" style="grid-column: span 3;">if improved</span>'
             '</div>'
         )
