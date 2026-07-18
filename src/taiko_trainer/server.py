@@ -226,18 +226,30 @@ def create_app(workspace: str) -> FastAPI:
             (replay_id,),
         ).fetchone()
         features = None
+        judged = None
         if row:
             content = get_map_content(conn, row["map_md5_ref"])
             if content:
                 try:
                     bm = _parse_bytes_as_osu(content)
                     features = extract_features(bm)
+                    # Also re-judge to expose per-note timing deltas for the
+                    # timing histogram. Cheap (~10-50ms per replay).
+                    with tempfile.NamedTemporaryFile(suffix=".osr", delete=False) as tmp:
+                        tmp.write(bytes(row["content"]))
+                        tmp_path = tmp.name
+                    try:
+                        rp = parse_osr_file(tmp_path)
+                    finally:
+                        Path(tmp_path).unlink(missing_ok=True)
+                    judged = judge_replay(bm, rp)
                 except Exception:
                     features = None
+                    judged = None
         conn.close()
         if not row:
             return HTMLResponse(_render_error(f"Replay {replay_id} for {player} not found."), status_code=404)
-        return _render_replay(dict(row), player, features)
+        return _render_replay(dict(row), player, features, judged)
 
     # --- upload ---------------------------------------------------------
 
@@ -473,6 +485,13 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-map .muted { color: var(--ink-faint); }
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
+/* --- timing histogram --- */
+.timing-hist-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--rule); }
+.timing-hist { width: 100%; max-width: 720px; height: auto; display: block; margin: 0 auto; }
+.timing-hist .ht-tick { fill: var(--ink-faint); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.05em; }
+.timing-hist-meta { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.timing-hist-meta b { color: var(--ink); font-weight: 500; }
+
 .eyebrow-row { margin-bottom: -20px; }
 
 /* --- skill radar --- */
@@ -2071,7 +2090,7 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
   </section>"""
 
 
-def _render_replay(row: dict, player: str, features=None) -> str:
+def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
     import json as _json
 
     causes_html = ""
@@ -2131,9 +2150,117 @@ def _render_replay(row: dict, player: str, features=None) -> str:
   <section class="card">
     <h2>Timing</h2>
     <p class="hint">delta mean {row['delta_mean_ms']:.1f} ms  ·  σ {row['delta_stddev_ms']:.1f} ms  ·  cheese rate {row['cheese_rate']*100:.2f}%  ·  fast-cheese pairs {row.get('fast_cheese_pairs', 0)}</p>
+    {_render_timing_histogram(judged) if judged else ""}
   </section>
 """
     return _html_page(f"replay #{row['id']}", body)
+
+
+def _render_timing_histogram(judged) -> str:
+    """SVG histogram of hit deltas with great/ok window bands overlaid.
+    Buckets are 4ms wide; range clamped to ±100ms with an "outlier" bucket
+    on each edge for anything beyond."""
+    from .judgment import Verdict as _V
+    deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
+    if not deltas:
+        return ""
+
+    great_w = judged.windows.great
+    ok_w = judged.windows.ok
+
+    # Buckets: 4ms wide, from -100 to +100. First/last are "spillover" buckets.
+    bucket_size = 4
+    range_min, range_max = -100, 100
+    n_buckets = (range_max - range_min) // bucket_size  # 50
+    counts = [0] * n_buckets
+    for d in deltas:
+        # Clamp to first/last bucket range for spillover.
+        if d < range_min:
+            counts[0] += 1
+        elif d >= range_max:
+            counts[-1] += 1
+        else:
+            counts[(d - range_min) // bucket_size] += 1
+
+    max_count = max(counts) or 1
+    W, H = 720, 180
+    pad_l, pad_r, pad_t, pad_b = 32, 12, 8, 32
+    plot_w = W - pad_l - pad_r
+    plot_h = H - pad_t - pad_b
+
+    def x_of(delta_ms):
+        return pad_l + (delta_ms - range_min) / (range_max - range_min) * plot_w
+    def y_of(count):
+        return pad_t + plot_h - (count / max_count) * plot_h
+
+    # Great/ok/miss window rectangles
+    # Great: [-great_w, +great_w]
+    # OK:    [-ok_w, +ok_w]  (which contains great)
+    ok_x1 = x_of(-ok_w)
+    ok_x2 = x_of(ok_w)
+    gr_x1 = x_of(-great_w)
+    gr_x2 = x_of(great_w)
+
+    bands = (
+        f'<rect x="{ok_x1:.1f}" y="{pad_t}" width="{ok_x2-ok_x1:.1f}" height="{plot_h}" fill="var(--ok)" opacity="0.10"/>'
+        f'<rect x="{gr_x1:.1f}" y="{pad_t}" width="{gr_x2-gr_x1:.1f}" height="{plot_h}" fill="var(--great)" opacity="0.14"/>'
+    )
+
+    # Histogram bars, colored by which window the bucket center falls in.
+    bars_svg = []
+    for i, c in enumerate(counts):
+        if c == 0: continue
+        center = range_min + i * bucket_size + bucket_size / 2
+        if abs(center) < great_w:
+            color = "var(--great)"
+        elif abs(center) < ok_w:
+            color = "var(--ok)"
+        else:
+            color = "var(--miss)"
+        x1 = x_of(range_min + i * bucket_size)
+        x2 = x_of(range_min + (i + 1) * bucket_size)
+        y = y_of(c)
+        bars_svg.append(f'<rect x="{x1:.1f}" y="{y:.1f}" width="{x2-x1-1:.1f}" height="{pad_t+plot_h-y:.1f}" fill="{color}" opacity="0.85"/>')
+
+    # Center line at 0 and mean line
+    mean_delta = sum(deltas) / len(deltas)
+    zero_x = x_of(0)
+    mean_x = x_of(max(range_min, min(range_max, mean_delta)))
+    lines = (
+        f'<line x1="{zero_x:.1f}" y1="{pad_t}" x2="{zero_x:.1f}" y2="{pad_t+plot_h}" stroke="var(--ink)" stroke-width="1" opacity="0.5"/>'
+        f'<line x1="{mean_x:.1f}" y1="{pad_t}" x2="{mean_x:.1f}" y2="{pad_t+plot_h}" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.9"/>'
+    )
+
+    # X-axis ticks at -80, -40, 0, 40, 80 ms
+    ticks = ""
+    for tick in (-80, -40, 0, 40, 80):
+        tx = x_of(tick)
+        ticks += (
+            f'<line x1="{tx:.1f}" y1="{pad_t+plot_h}" x2="{tx:.1f}" y2="{pad_t+plot_h+4}" stroke="var(--ink-faint)"/>'
+            f'<text x="{tx:.1f}" y="{pad_t+plot_h+18}" text-anchor="middle" class="ht-tick">{tick:+d} ms</text>'
+        )
+
+    # Summary counts
+    n_early = sum(1 for d in deltas if d < 0)
+    n_late = sum(1 for d in deltas if d > 0)
+    bias = "early" if n_early > n_late * 1.15 else "late" if n_late > n_early * 1.15 else "balanced"
+
+    return f"""
+    <div class="timing-hist-wrap">
+      <svg viewBox="0 0 {W} {H}" class="timing-hist" preserveAspectRatio="xMidYMid meet">
+        {bands}
+        {"".join(bars_svg)}
+        {lines}
+        {ticks}
+        <text x="{pad_l}" y="{pad_t + plot_h + 18}" class="ht-tick" text-anchor="start">early</text>
+        <text x="{W - pad_r}" y="{pad_t + plot_h + 18}" class="ht-tick" text-anchor="end">late</text>
+      </svg>
+      <div class="timing-hist-meta">
+        <span><b>{n_early}</b> early  ·  <b>{n_late}</b> late  ·  bias: <b>{bias}</b></span>
+        <span>windows: great ±{great_w:.0f}ms, ok ±{ok_w:.0f}ms  ·  bars beyond ok = timing misses</span>
+      </div>
+    </div>
+    """
 
 
 def _render_features_panel(f) -> str:
