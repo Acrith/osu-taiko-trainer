@@ -928,14 +928,15 @@ def _colorize_signature(sig: str) -> str:
 def _render_weakness_patterns(report, player: str) -> str:
     """Cluster the misses across the player's BEST play of each map by pattern
     signature. Surfaces genuine weaknesses evidenced by consistent misses across
-    stable records, not one-off bad plays."""
+    stable records, not one-off bad plays.
+
+    Hidden entirely until at least one diagnostic signature bit the player
+    across ≥ 3 different maps with ≥ 5 misses. Below that threshold, any
+    'cluster' is noise — a random miss is nothing to improve. Feature comes
+    back automatically once the corpus grows enough for signal."""
     clusters = getattr(report, "weakness_clusters", ()) or ()
     if not clusters:
-        return (
-            '<section class="card"><h2>Weakness patterns</h2>'
-            '<p class="hint">No pattern data yet. Upload replays (or run <code>refresh</code>) and this section will surface the specific pattern signatures your misses cluster around.</p>'
-            '</section>'
-        )
+        return ""
     total_misses = sum(c.miss_count for c in clusters)
     rows_html = ""
     for c in clusters:

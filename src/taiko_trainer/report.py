@@ -332,14 +332,16 @@ def _compute_weakness_clusters(replays: list[dict], top_n: int = 8) -> tuple:
             map_key = (r.get("map_title") or "?", r.get("map_version") or "?", int(r["id"]))
             slot["maps"][map_key] = slot["maps"].get(map_key, 0) + 1
 
-    # Noise floor: a cluster must have at least MIN_HITS misses OR span at
-    # least 2 different maps. Single-map 2-miss clusters are almost always
-    # coincidence and drown out the real weaknesses.
-    MIN_HITS = 4
-    MIN_MAPS = 2
+    # Noise floor: a cluster only earns display space if the SAME diagnostic
+    # signature bit the player across multiple maps enough times that random
+    # mistiming can't explain it. "5 misses across 3 different maps" is the
+    # bar — a single-map 2-miss cluster is essentially a coincidence at any
+    # realistic replay corpus size.
+    MIN_HITS = 5
+    MIN_MAPS = 3
     surviving = [
         (k, d) for k, d in clusters.items()
-        if d["count"] >= MIN_HITS or len(d["maps"]) >= MIN_MAPS
+        if d["count"] >= MIN_HITS and len(d["maps"]) >= MIN_MAPS
     ]
     ordered = sorted(surviving, key=lambda kv: -kv[1]["count"])[:top_n]
     return tuple(
