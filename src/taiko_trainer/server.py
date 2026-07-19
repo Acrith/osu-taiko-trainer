@@ -3442,56 +3442,64 @@ def _rank_medal(rank: int) -> str:
     return f'<span class="lb-rank">#{rank}</span>'
 
 
-def _lb_user_row(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> str:
-    """One row of a leaderboard. rank is 1-indexed. `u` comes from
-    top_users_by_skill (has osu_username, avatar_url, six dim values)."""
+def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> str:
+    """One leaderboard row as a card (not a table row). Card layout means the
+    value + other-dims cluster on the right stays visually aligned with the
+    player info cluster on the left regardless of how many dim chips there
+    are. Works for both the overview (show_all_dims=False, compact) and the
+    full per-dim ranking (show_all_dims=True, expanded)."""
     av = u.get("osu_avatar_url") or ""
-    country = u.get("osu_country_code") or ""
+    country = (u.get("osu_country_code") or "").upper()
     main_val = int(u[dim])
-    other_dims = ""
+    replays = u.get("replays", 0)
+    country_html = f'<span class="lb-country" title="{country}">{country}</span>' if country else ""
+    other_dims_html = ""
     if show_all_dims:
-        others = "".join(
-            f'<span class="lb-otherdim" title="{d}">{d[:3]} {int(u[d])}</span>'
+        chips = "".join(
+            f'<span class="lb-otherdim" title="{d}: {int(u[d]):,}">'
+            f'<span class="lb-otherdim-k">{d[:3]}</span>'
+            f'<span class="lb-otherdim-v">{int(u[d]):,}</span>'
+            f'</span>'
             for d in _LEADERBOARD_DIMS if d != dim
         )
-        other_dims = f'<div class="lb-otherdims">{others}</div>'
-    replays = u.get("replays", 0)
+        other_dims_html = f'<div class="lb-otherdims">{chips}</div>'
     return f"""
-    <tr class="lb-row" data-href="/u/{u['osu_username']}">
-      <td class="lb-rank-cell">{_rank_medal(rank)}</td>
-      <td class="lb-user-cell">
-        {'<img class="lb-avatar" src="' + av + '" alt="">' if av else '<span class="lb-avatar-blank"></span>'}
-        <div>
-          <div class="lb-name"><a href="/u/{u['osu_username']}">{u['osu_username']}</a></div>
-          <div class="lb-sub">{country + " · " if country else ""}{replays} replays</div>
+    <a class="lb-card" href="/u/{u['osu_username']}">
+      <div class="lb-card-rank">{_rank_medal(rank)}</div>
+      {'<img class="lb-avatar" src="' + av + '" alt="">' if av else '<span class="lb-avatar-blank"></span>'}
+      <div class="lb-card-name">
+        <div class="lb-name-row">
+          <span class="lb-name">{u['osu_username']}</span>
+          {country_html}
         </div>
-      </td>
-      <td class="lb-value">{main_val:,}</td>
-      {f'<td>{other_dims}</td>' if show_all_dims else ''}
-    </tr>"""
+        <div class="lb-sub">{replays} replays</div>
+      </div>
+      <div class="lb-card-value">{main_val:,}</div>
+      {other_dims_html}
+    </a>"""
 
 
 def _render_leaderboards_overview(cols: dict[str, list[dict]]) -> str:
-    """Six columns, one per dim. Top 5 each, click header for the full ranking."""
+    """Six columns, one per dim. Top 5 each. The whole column header is one
+    clickable link to the full ranking."""
     col_html = ""
     for dim in _LEADERBOARD_DIMS:
         users = cols.get(dim, [])
-        rows = "".join(_lb_user_row(i + 1, u, dim) for i, u in enumerate(users))
-        if not rows:
-            rows = '<tr><td colspan="3" class="lb-empty">no plays yet</td></tr>'
+        cards = "".join(_lb_user_card(i + 1, u, dim) for i, u in enumerate(users))
+        if not cards:
+            cards = '<div class="lb-empty">no plays yet</div>'
         col_html += f"""
         <div class="lb-col">
-          <h3 class="lb-col-title">
-            <a href="/leaderboards/{dim}">{dim}</a>
+          <a class="lb-col-title" href="/leaderboards/{dim}">
+            <span class="lb-col-dim">{dim}</span>
             <span class="lb-col-more">view all →</span>
-          </h3>
-          <table class="lb-table"><tbody>{rows}</tbody></table>
+          </a>
+          <div class="lb-list">{cards}</div>
         </div>"""
     body = f"""
   <section>
     <h1 class="page-title">Leaderboards</h1>
-    <p class="hint">Top players by skill dimension. Ranks are latest-snapshot values from
-    each player's public profile. Click a dim to see the full ranking.</p>
+    <p class="hint">Top players by skill dimension. Ranks are the latest-snapshot values from each player's public profile. Click a column header for the full ranking.</p>
   </section>
 
   <section class="lb-overview">
@@ -3504,10 +3512,12 @@ def _render_leaderboards_overview(cols: dict[str, list[dict]]) -> str:
 
 
 def _render_leaderboards_dim(dim: str, users: list[dict]) -> str:
-    """Full ranking for one dim. Includes all six skill values for context."""
-    rows_html = "".join(_lb_user_row(i + 1, u, dim, show_all_dims=True) for i, u in enumerate(users))
-    if not rows_html:
-        rows_html = '<tr><td colspan="4" class="lb-empty">nobody has played yet</td></tr>'
+    """Full ranking for one dim as a card list (not a table). Cards keep
+    the value + other-dim chips visually aligned across rows regardless
+    of chip content width."""
+    cards_html = "".join(_lb_user_card(i + 1, u, dim, show_all_dims=True) for i, u in enumerate(users))
+    if not cards_html:
+        cards_html = '<div class="lb-empty">nobody has played yet</div>'
     dim_tabs = " ".join(
         f'<a class="lb-tab {"active" if d == dim else ""}" href="/leaderboards/{d}">{d}</a>'
         for d in _LEADERBOARD_DIMS
@@ -3520,12 +3530,7 @@ def _render_leaderboards_dim(dim: str, users: list[dict]) -> str:
   </section>
 
   <section class="lb-full">
-    <table class="lb-table lb-table-full">
-      <thead><tr>
-        <th>rank</th><th>player</th><th>{dim}</th><th>other dims</th>
-      </tr></thead>
-      <tbody>{rows_html}</tbody>
-    </table>
+    <div class="lb-list lb-list-full">{cards_html}</div>
   </section>
 
   {_leaderboards_css()}
@@ -3539,9 +3544,15 @@ def _leaderboards_css() -> str:
     .page-title { font-family: var(--font-mono); font-size: 28px; margin: 0 0 8px; color: var(--ink); }
     .lb-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-top: 20px; }
     .lb-col { background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 16px; }
-    .lb-col-title { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; margin: 0 0 12px; color: var(--accent); display: flex; justify-content: space-between; align-items: baseline; }
-    .lb-col-title a { color: var(--accent); text-decoration: none; }
-    .lb-col-title a:hover { text-decoration: underline; }
+
+    /* Whole column header is one link — dim name + view all click the same */
+    .lb-col-title { display: flex; justify-content: space-between; align-items: baseline;
+                    font-family: var(--font-mono); text-decoration: none; margin-bottom: 12px;
+                    padding-bottom: 8px; border-bottom: 1px solid var(--rule); }
+    .lb-col-title:hover { text-decoration: none; }
+    .lb-col-title:hover .lb-col-dim { color: var(--ink); }
+    .lb-col-title:hover .lb-col-more { color: var(--accent); }
+    .lb-col-dim { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent); }
     .lb-col-more { font-size: 10px; color: var(--ink-faint); letter-spacing: 0.08em; }
 
     .lb-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }
@@ -3549,41 +3560,67 @@ def _leaderboards_css() -> str:
     .lb-tab:hover { border-color: var(--accent-soft); color: var(--ink); text-decoration: none; }
     .lb-tab.active { border-color: var(--accent); color: var(--accent); }
 
-    .lb-table { width: 100%; border-collapse: separate; border-spacing: 0 4px; }
-    .lb-table tr.lb-row { cursor: pointer; }
-    .lb-table tr.lb-row:hover td { background: var(--panel-hover, rgba(255,255,255,0.02)); }
-    .lb-table td { padding: 8px 10px; background: transparent; border-radius: 3px; font-family: var(--font-mono); }
-    .lb-table th { padding: 6px 10px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); text-align: left; }
-    .lb-rank-cell { width: 40px; }
-    .lb-rank { color: var(--ink-faint); font-size: 12px; }
+    /* Card-based leaderboard row. Grid layout keeps the value + chip cluster
+       right-anchored regardless of chip count, and the player info stays
+       left-anchored — no more table-column drift. */
+    .lb-list { display: flex; flex-direction: column; gap: 6px; }
+    .lb-card {
+      display: grid; align-items: center;
+      grid-template-columns: 30px 32px 1fr auto;
+      grid-template-areas: "rank avatar name value";
+      gap: 12px; padding: 8px 12px; border-radius: 4px;
+      background: transparent; border: 1px solid transparent; text-decoration: none;
+      font-family: var(--font-mono);
+    }
+    .lb-card:hover { border-color: var(--rule); background: rgba(255,255,255,0.02); text-decoration: none; }
+    .lb-card-rank { grid-area: rank; text-align: center; }
+    .lb-card .lb-avatar, .lb-card .lb-avatar-blank { grid-area: avatar; }
+    .lb-card-name { grid-area: name; min-width: 0; }
+    .lb-card-value { grid-area: value; font-size: 20px; font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; min-width: 80px; }
+
+    .lb-name-row { display: flex; align-items: center; gap: 8px; }
+    .lb-name { color: var(--ink); font-weight: 500; font-size: 14px; }
+    .lb-card:hover .lb-name { color: var(--accent); }
+    .lb-sub { font-size: 10px; color: var(--ink-faint); margin-top: 2px; }
+
+    /* Country as a small badge next to the name */
+    .lb-country {
+      display: inline-block; font-size: 9px; letter-spacing: 0.1em;
+      padding: 2px 6px; border: 1px solid var(--rule); border-radius: 3px;
+      color: var(--ink-muted); font-family: var(--font-mono); font-weight: 500;
+      background: var(--panel);
+    }
+
+    .lb-avatar, .lb-avatar-blank { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 1px solid var(--rule); flex-shrink: 0; }
+    .lb-avatar-blank { background: var(--panel); }
+
+    .lb-rank { color: var(--ink-faint); font-size: 12px; font-weight: 500; }
     .lb-medal { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 50%; font-weight: 700; font-size: 11px; }
     .lb-medal.gold { background: linear-gradient(180deg, #f0d475, #d4af37); color: #3a2a00; }
     .lb-medal.silver { background: linear-gradient(180deg, #dcdcdc, #a8a8a8); color: #1a1a1a; }
     .lb-medal.bronze { background: linear-gradient(180deg, #d29c6a, #a06a3a); color: #1a1a00; }
 
-    .lb-user-cell { display: flex; align-items: center; gap: 10px; }
-    .lb-avatar, .lb-avatar-blank { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 1px solid var(--rule); flex-shrink: 0; }
-    .lb-avatar-blank { background: var(--panel); }
-    .lb-name a { color: var(--ink); text-decoration: none; font-weight: 500; }
-    .lb-name a:hover { color: var(--accent); text-decoration: none; }
-    .lb-sub { font-size: 10px; color: var(--ink-faint); }
+    /* Full-dim page: cards get an extra area for other-dim chips, wrapping
+       below the main row on narrow viewports. */
+    .lb-list-full .lb-card {
+      grid-template-columns: 30px 32px 1fr auto auto;
+      grid-template-areas: "rank avatar name value chips";
+    }
+    .lb-otherdims { grid-area: chips; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; margin-left: 12px; }
+    .lb-otherdim { display: inline-flex; gap: 4px; font-size: 10px; padding: 2px 8px; border: 1px solid var(--rule); border-radius: 3px; background: var(--panel); }
+    .lb-otherdim-k { color: var(--ink-faint); letter-spacing: 0.06em; }
+    .lb-otherdim-v { color: var(--ink); font-variant-numeric: tabular-nums; }
 
-    .lb-value { font-size: 18px; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; font-weight: 500; }
-    .lb-otherdims { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
-    .lb-otherdim { font-size: 10px; padding: 2px 6px; border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-muted); }
+    @media (max-width: 760px) {
+      .lb-list-full .lb-card {
+        grid-template-columns: 30px 32px 1fr auto;
+        grid-template-areas: "rank avatar name value" ".    .      chips chips";
+      }
+      .lb-otherdims { justify-content: flex-start; margin-left: 0; margin-top: 6px; }
+    }
 
     .lb-empty { color: var(--ink-faint); text-align: center; padding: 20px; font-family: var(--font-mono); font-size: 12px; }
-
-    /* Row click via JS below */
   </style>
-  <script>
-  document.querySelectorAll('.lb-table tr.lb-row').forEach(tr => {
-    tr.addEventListener('click', ev => {
-      if (ev.target.tagName === 'A' || ev.target.tagName === 'IMG') return;
-      window.location = tr.dataset.href;
-    });
-  });
-  </script>
 """
 
 
@@ -3767,10 +3804,10 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
         acc = p["accuracy"] * 100
         plays_rows += (
             f'<tr class="map-play-row" data-href="/replay/{p["player_name"]}/{p["replay_id"]}">'
-            f'<td class="lb-rank-cell">{rank}</td>'
-            f'<td class="lb-user-cell">'
-            f'{"<img class=\"lb-avatar\" src=\"" + av + "\" alt=\"\">" if av else "<span class=\"lb-avatar-blank\"></span>"}'
-            f'<div class="lb-name"><a href="/u/{p["osu_username"]}">{p["osu_username"]}</a></div>'
+            f'<td class="mp-rank">{rank}</td>'
+            f'<td class="mp-user">'
+            f'{"<img class=\"mp-avatar\" src=\"" + av + "\" alt=\"\">" if av else "<span class=\"mp-avatar-blank\"></span>"}'
+            f'<a class="mp-name" href="/u/{p["osu_username"]}">{p["osu_username"]}</a>'
             f'</td>'
             f'<td class="tabular">{acc:.2f}%</td>'
             f'<td>{mods_chip if mods_chip else "<span class=\"muted\">NM</span>"}</td>'
@@ -3779,7 +3816,7 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
             f'</tr>'
         )
     if not plays_rows:
-        plays_rows = '<tr><td colspan="6" class="lb-empty">no public plays on this map yet</td></tr>'
+        plays_rows = '<tr><td colspan="6" class="mp-empty">no public plays on this map yet</td></tr>'
 
     features_html = _render_features_panel(features) if features else ""
 
@@ -3815,9 +3852,9 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
   <section class="card">
     <h2>Top plays  <span class="hint" style="font-size: 12px; margin-left: 8px;">{len(plays)} public plays</span></h2>
     <div style="overflow-x: auto;">
-      <table class="lb-table">
+      <table class="mp-table">
         <thead><tr>
-          <th>rank</th><th>player</th><th>accuracy</th><th>mods</th><th>great/ok/miss</th><th>played</th>
+          <th>rank</th><th>player</th><th class="tabular">accuracy</th><th>mods</th><th class="tabular">great/ok/miss</th><th class="tabular">played</th>
         </tr></thead>
         <tbody>{plays_rows}</tbody>
       </table>
@@ -3829,9 +3866,22 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
     .map-hero-simple .hero-title {{ font-size: 34px; margin: 4px 0; }}
     .map-hero-simple .hero-artist {{ color: var(--ink-muted); font-size: 14px; margin: 0 0 4px; }}
     .map-hero-simple .hero-meta {{ color: var(--ink-faint); font-size: 12px; margin: 0 0 14px; font-family: var(--font-mono); }}
+
+    .mp-table {{ width: 100%; border-collapse: separate; border-spacing: 0 3px; font-family: var(--font-mono); }}
+    .mp-table th {{ padding: 8px 10px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); text-align: left; }}
+    .mp-table th.tabular {{ text-align: right; }}
+    .mp-table td {{ padding: 8px 10px; background: transparent; font-size: 12px; text-align: left; }}
+    .mp-table td.tabular {{ font-variant-numeric: tabular-nums; text-align: right; color: var(--ink); }}
+    .mp-rank {{ width: 40px; text-align: center; }}
+    .mp-user {{ display: flex; align-items: center; gap: 10px; }}
+    .mp-avatar, .mp-avatar-blank {{ width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 1px solid var(--rule); flex-shrink: 0; }}
+    .mp-avatar-blank {{ background: var(--panel); }}
+    .mp-name {{ color: var(--ink); font-weight: 500; text-decoration: none; }}
+    .mp-name:hover {{ color: var(--accent); text-decoration: none; }}
     .map-play-row {{ cursor: pointer; }}
     .map-play-row:hover td {{ background: rgba(255,255,255,0.02); }}
     .muted {{ color: var(--ink-faint); font-size: 11px; }}
+    .mp-empty {{ color: var(--ink-faint); text-align: center; padding: 20px; font-size: 12px; }}
   </style>
   <script>
     document.querySelectorAll('.map-play-row').forEach(tr => {{
