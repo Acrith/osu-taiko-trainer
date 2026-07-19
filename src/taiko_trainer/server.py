@@ -2509,6 +2509,7 @@ def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
       <div class="stat"><span class="k">gimmick</span><span class="v">{row['rating_gimmick']:.0f}</span></div>
       <div class="stat"><span class="k">technical</span><span class="v">{row['rating_technical']:.0f}</span></div>
       <div class="stat"><span class="k">consistency</span><span class="v">{row['rating_consistency']:.0f}</span></div>
+      <div class="stat"><span class="k">reading</span><span class="v">{(row.get('rating_reading') or 0):.0f}</span></div>
     </div>
   </section>
 
@@ -2705,6 +2706,13 @@ def _render_features_panel(f) -> str:
       <div class="feat-row"><span class="k">burst mean length</span><span class="v">{b.mean_length:.1f}</span></div>
       <div class="feat-row"><span class="k">longest burst</span><span class="v">{b.max_length}</span></div>
       <div class="feat-row"><span class="k">long-burst share (≥7)</span><span class="v">{b.length_7plus_ratio*100:.0f}%</span></div>
+    </div>
+
+    <div class="feat-group">
+      <div class="feat-title"><span>reading</span><span class="feat-val">dense scroll {f.reading.velocity_dense_p50:.0f} · sustained {f.reading.sustained_share*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">dense p50 (bpm × sv)</span><span class="v">{f.reading.velocity_dense_p50:.0f}</span></div>
+      <div class="feat-row"><span class="k">sustained-fast share</span><span class="v">{f.reading.sustained_share*100:.0f}%</span></div>
+      <div class="feat-row"><span class="k">overall p95 (unfiltered)</span><span class="v">{f.reading.velocity_p95:.0f}</span></div>
     </div>
   </section>"""
 
