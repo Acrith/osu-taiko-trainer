@@ -231,8 +231,16 @@ def create_app(workspace: str) -> FastAPI:
                    m.md5 AS map_md5_ref,
                    m.beatmap_id, m.beatmapset_id,
                    m.duration_s, m.hittable_notes, m.bpm_min, m.bpm_max, m.od,
-                   m.rating_speed, m.rating_stamina, m.rating_gimmick,
-                   m.rating_technical, m.rating_consistency
+                   -- Show the rating the player actually cleared: mod-adjusted
+                   -- effective when present, base map rating for NM. Same
+                   -- COALESCE shape as get_replays() so this page's numbers
+                   -- match the training-report row for the same play.
+                   COALESCE(r.rating_speed_eff,       m.rating_speed)       AS rating_speed,
+                   COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
+                   COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
+                   COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
+                   COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency,
+                   COALESCE(r.rating_reading_eff,     m.rating_reading, 0)  AS rating_reading
             FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
             WHERE r.id = ?
             """,
@@ -494,7 +502,7 @@ h2 { font-family: var(--font-mono); font-weight: 500; font-size: 20px; margin: 0
 .grid { display: grid; gap: 16px; }
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
-.stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; }
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; }
 .stat { background: var(--panel); padding: 10px 14px; display: grid; gap: 3px; }
 .stat .k { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); }
 .stat .v { font-family: var(--font-mono); font-size: 16px; font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; }
