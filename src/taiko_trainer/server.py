@@ -552,6 +552,23 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .hero-country { display: inline-block; padding: 2px 8px; font-size: 10px; letter-spacing: 0.12em; background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.9); border-radius: 3px; }
 .hero-rank { font-size: 11px; color: rgba(255,255,255,0.65); }
 
+/* --- osu! avatar portrait inside player hero --- */
+.hero-inner.has-avatar { grid-template-columns: 128px 1fr 320px; }
+@media (max-width: 900px) {
+  .hero-inner.has-avatar { grid-template-columns: 96px 1fr; }
+}
+.hero-avatar {
+  width: 128px; height: 128px;
+  border-radius: 12px;
+  object-fit: cover;
+  align-self: end;
+  border: 2px solid rgba(255,255,255,0.16);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+@media (max-width: 900px) {
+  .hero-avatar { width: 96px; height: 96px; }
+}
+
 /* --- osu! API status card --- */
 .api-status { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 4px; font-family: var(--font-mono); font-size: 13px; }
 .api-status.connected { background: rgba(74, 119, 82, 0.14); border: 1px solid var(--great); color: var(--ink); }
@@ -969,26 +986,24 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
         raw = history[-1].get("latest_replay_played_at", "")
         latest_date = raw[:10] if raw else ""
 
-    # If we have an osu! avatar linked, use it dimmed as the background image
-    # (same treatment as the beatmap hero cover). Otherwise fall back to a
-    # dark base with subtle warm/cool radial hotspots.
+    # Dark base with subtle warm/cool radial hotspots. Avatar is rendered as
+    # a separate portrait element in the hero-left column (see below) instead
+    # of dimmed as the full background — banner-shape doesn't fit a square
+    # avatar image and imitates the osu! profile-page layout better.
+    bg = ("background: "
+          "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
+          "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
+          "#16181D;")
     avatar_url = getattr(report, "osu_avatar_url", None)
-    if avatar_url:
-        bg = (
-            "background: "
-            f"linear-gradient(180deg, rgba(15,17,20,0.35) 0%, rgba(15,17,20,0.92) 100%), "
-            f'url("{avatar_url}"); '
-            "background-size: cover; background-position: center;"
-        )
-    else:
-        bg = ("background: "
-              "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
-              "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
-              "#16181D;")
+    avatar_html = (
+        f'<img class="hero-avatar" src="{avatar_url}" alt="{report.osu_username or player} avatar">'
+        if avatar_url else ""
+    )
 
     return f"""
   <section class="map-hero" style='{bg}'>
-    <div class="hero-inner">
+    <div class="hero-inner {"has-avatar" if avatar_url else ""}">
+      {avatar_html}
       <div class="hero-left">
         <div class="hero-pill-row">
           <span class="diff-pill">{style_short}</span>
