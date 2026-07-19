@@ -162,12 +162,13 @@ def refresh_ratings(workspace: str) -> None:
                     rate_map(
                         feats,
                         od=bm.difficulty.overall_difficulty,
+                        od_mult=mods.od_mult,
                         hit_window_mult=mods.hit_window_mult,
                         reading_mult=mods.reading_mult,
                     )
                     if mods.alters_map else None
                 )
-                judged = judge_replay(play_bm, rp, hit_window_mult=mods.hit_window_mult)
+                judged = judge_replay(play_bm, rp, od_mult=mods.od_mult, hit_window_mult=mods.hit_window_mult)
                 classes = classify_failures(judged, play_bm, feats)
                 summary = summarize_failures(classes)
                 miss_patterns = extract_miss_patterns(classes, play_bm.hittable())

@@ -299,7 +299,11 @@ def _raw_reading(f: MapFeatures) -> float:
     return 55 * dense_p50_n + 45 * share_n
 
 
-def _od_pressure(od: float, hit_window_mult: float = 1.0) -> float:
+def _od_pressure(
+    od: float,
+    od_mult: float = 1.0,
+    hit_window_mult: float = 1.0,
+) -> float:
     """How much tighter accuracy is vs the OD 5 baseline (great window = 35 ms).
 
     Returns:
@@ -309,9 +313,15 @@ def _od_pressure(od: float, hit_window_mult: float = 1.0) -> float:
 
     Used to modulate consistency and (to a smaller extent) technical:
     a fast map at OD 4 rewards fewer accuracy skills than the same map at OD 8;
-    HR + DT stack this even further because both shrink the window."""
+    HR + DT stack this even further because both shrink the window.
+
+    `od_mult` scales the OD number before window lookup (HR = 1.4, EZ = 0.5,
+    capped at 10). `hit_window_mult` scales the wall-clock window after
+    lookup (DT = 1/1.5, HT = 1/0.75). Same split as `JudgmentWindows.from_od`
+    so the pressure the rating sees matches the pressure the judge sees."""
     from .judgment import _od_lerp
-    window = _od_lerp(od, 50.0, 35.0, 20.0) * hit_window_mult
+    effective_od = min(od * od_mult, 10.0)
+    window = _od_lerp(effective_od, 50.0, 35.0, 20.0) * hit_window_mult
     return 35.0 / max(window, 1.0)
 
 
@@ -328,20 +338,23 @@ def rate_map(
     features: MapFeatures,
     *,
     od: float = 5.0,
+    od_mult: float = 1.0,
     hit_window_mult: float = 1.0,
     reading_mult: float = 1.0,
 ) -> DimensionRating:
     """Rate the map on the six dimensions.
 
-    `od` is the map's OverallDifficulty (from `.osu`). `hit_window_mult`
-    is the accuracy-tightening from mods (see `mods.parse_mods`) — HR
-    alone doesn't change BPM but does tighten windows, so it lands here.
+    `od` is the map's OverallDifficulty (from `.osu`). `od_mult` scales
+    the OD number itself (HR = 1.4, EZ = 0.5). `hit_window_mult` scales
+    the wall-clock window after OD lookup (DT = 1/1.5, HT = 1/0.75).
+    Splitting the two matches judgment's behavior — HR/EZ recompute at
+    effective OD, DT/HT scale windows after.
     `reading_mult` is the HD reading multiplier (1.25 when HD is on) —
     HD doesn't change what feature extraction sees, it just makes what's
     there harder to visually process, so we apply it as a straight
     multiplier on the reading dim after the structural signal is computed."""
     bonus = _length_bonus(features.hittable_notes)
-    pressure = _od_pressure(od, hit_window_mult)
+    pressure = _od_pressure(od, od_mult=od_mult, hit_window_mult=hit_window_mult)
     cons_mult = 1.0 + _OD_BOOST_K_CONSISTENCY * (pressure - 1.0)
     tech_mult = 1.0 + _OD_BOOST_K_TECHNICAL   * (pressure - 1.0)
     return DimensionRating(
