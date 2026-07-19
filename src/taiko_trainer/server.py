@@ -381,7 +381,37 @@ def create_app(workspace: str) -> FastAPI:
     # --- HTML pages ------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request):
+    def home(
+        request: Request,
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        # WEB mode branches on auth state:
+        # - logged in → straight to /me (which resolves to /u/{osu_username})
+        # - anon → landing page. Local-mode workspace stats + upload drop
+        #   don't belong here; that's an operator-view surface, not a
+        #   user-view landing.
+        if auth_module.is_web_mode():
+            uid = auth_module.read_session_cookie(session)
+            if uid is not None:
+                cat = open_catalog(workspace)
+                user = get_user_by_id(cat, uid)
+                cat.close()
+                if user:
+                    return RedirectResponse(url=f"/u/{user['osu_username']}", status_code=302)
+            # Anon: landing page
+            cat = open_catalog(workspace)
+            public_users = cat.execute(
+                """
+                SELECT osu_username, osu_avatar_url
+                FROM users
+                WHERE profile_public = 1
+                ORDER BY last_login_at DESC LIMIT 6
+                """
+            ).fetchall()
+            cat.close()
+            return _render_web_landing([dict(r) for r in public_users])
+
+        # LOCAL mode: workspace-operator view (unchanged)
         from . import osu_api
         ws_stats = workspace_status(workspace)
         players_info = []
@@ -3265,6 +3295,82 @@ def _render_features_panel(f) -> str:
       <div class="feat-row"><span class="k">overall p95 (unfiltered)</span><span class="v">{f.reading.velocity_p95:.0f}</span></div>
     </div>
   </section>"""
+
+
+def _render_web_landing(recent_users: list[dict]) -> str:
+    """Anon landing page for web mode. Explains what the tool is + the
+    "log in with osu!" CTA + a small "recently active" strip so a
+    first-time visitor sees the service isn't a ghost town."""
+    users_html = ""
+    if recent_users:
+        chips = "".join(
+            f'<a class="landing-user" href="/u/{u["osu_username"]}">'
+            f'{"<img src=\"" + u["osu_avatar_url"] + "\" alt=\"\">" if u["osu_avatar_url"] else ""}'
+            f'<span>{u["osu_username"]}</span></a>'
+            for u in recent_users
+        )
+        users_html = f"""
+    <div class="landing-recent">
+      <div class="landing-recent-label">Recently active</div>
+      <div class="landing-user-strip">{chips}</div>
+    </div>
+"""
+
+    body = f"""
+  <section class="landing-hero">
+    <h1 class="landing-title">taiko-trainer</h1>
+    <p class="landing-lede">
+      Skill diagnosis and training targets for osu!taiko. Upload replays,
+      get a six-dimension skill vector, see the exact patterns that hurt
+      your accuracy, and get map recommendations calibrated to push what
+      you're weakest at.
+    </p>
+    <div class="landing-cta-row">
+      <a class="landing-cta" href="/login">Log in with osu!</a>
+    </div>
+    <p class="landing-hint">
+      Free. Data stays yours — you can delete your account and every
+      replay at any time from settings.
+    </p>
+    {users_html}
+  </section>
+
+  <section class="landing-features">
+    <div class="landing-feat">
+      <div class="landing-feat-title">Six-dim skill vector</div>
+      <div class="landing-feat-body">Speed, stamina, gimmick, technical, consistency, reading — each anchored to real KDDK play, each modulated by the mods your replays used (DT, HR, HD, HDDT, HRDT…).</div>
+    </div>
+    <div class="landing-feat">
+      <div class="landing-feat-title">Per-miss classification</div>
+      <div class="landing-feat-body">Every miss tagged with the primary cause (wrong color, parity break, speed cap, stamina, technical, gimmick, timing drift) so weakness patterns are diagnostic, not just "you missed some notes".</div>
+    </div>
+    <div class="landing-feat">
+      <div class="landing-feat-title">Uploader companion</div>
+      <div class="landing-feat-body">Small local agent watches your Data/r folder and auto-posts new replays to your account. Your report updates seconds after each play. Historic replays never touched unless you explicitly ask.</div>
+    </div>
+  </section>
+
+  <style>
+    .landing-hero {{ text-align: center; padding: 60px 20px 20px; }}
+    .landing-title {{ font-family: var(--font-mono); font-size: 56px; letter-spacing: -0.02em; margin: 0 0 16px; color: var(--ink); }}
+    .landing-lede {{ font-size: 16px; line-height: 1.6; color: var(--ink-muted); max-width: 640px; margin: 0 auto 32px; }}
+    .landing-cta-row {{ margin: 28px 0 12px; }}
+    .landing-cta {{ display: inline-block; padding: 14px 36px; background: var(--accent); color: white; border-radius: 3px; font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.16em; text-transform: uppercase; text-decoration: none; }}
+    .landing-cta:hover {{ background: var(--accent-hover, #d18944); text-decoration: none; }}
+    .landing-hint {{ font-size: 12px; color: var(--ink-faint); margin-top: 8px; }}
+    .landing-recent {{ margin-top: 48px; }}
+    .landing-recent-label {{ font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 14px; }}
+    .landing-user-strip {{ display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }}
+    .landing-user {{ display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--rule); border-radius: 3px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); text-decoration: none; }}
+    .landing-user:hover {{ border-color: var(--accent); color: var(--accent); text-decoration: none; }}
+    .landing-user img {{ width: 20px; height: 20px; border-radius: 50%; }}
+    .landing-features {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 60px; }}
+    .landing-feat {{ padding: 20px; border: 1px solid var(--rule); border-radius: 4px; background: var(--panel); }}
+    .landing-feat-title {{ font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }}
+    .landing-feat-body {{ font-size: 13px; line-height: 1.6; color: var(--ink-muted); }}
+  </style>
+"""
+    return _html_page("taiko-trainer", body)
 
 
 def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
