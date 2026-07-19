@@ -53,6 +53,7 @@ class TrainingReport:
     osu_user_id: int | None = None
     osu_username: str | None = None
     osu_avatar_url: str | None = None
+    osu_cover_url: str | None = None
     osu_country_code: str | None = None
     osu_global_rank: int | None = None
 
@@ -66,7 +67,7 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
     # Player name + osu! profile linkage come from player_info.
     prow = conn.execute(
         "SELECT name, style, osu_user_id, osu_username, osu_avatar_url, "
-        "osu_country_code, osu_global_rank FROM player_info LIMIT 1"
+        "osu_cover_url, osu_country_code, osu_global_rank FROM player_info LIMIT 1"
     ).fetchone()
     if not prow:
         return None
@@ -146,6 +147,7 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
         osu_user_id=prow["osu_user_id"],
         osu_username=prow["osu_username"],
         osu_avatar_url=prow["osu_avatar_url"],
+        osu_cover_url=prow["osu_cover_url"],
         osu_country_code=prow["osu_country_code"],
         osu_global_rank=prow["osu_global_rank"],
         suggestions=tuple(suggestions),

@@ -71,6 +71,7 @@ class OsuUser:
     id: int
     username: str
     avatar_url: str
+    cover_url: str            # profile banner (assets.ppy.sh/user-profile-covers/...)
     country_code: str
     global_rank_taiko: int | None
 
@@ -179,10 +180,12 @@ def lookup_user(conn: sqlite3.Connection, username: str) -> OsuUser | None:
         )
     data = resp.json()
     stats = data.get("statistics", {}) or {}
+    cover = data.get("cover") or {}
     return OsuUser(
         id=data.get("id", 0),
         username=data.get("username", username),
         avatar_url=data.get("avatar_url", ""),
+        cover_url=cover.get("url", ""),
         country_code=(data.get("country") or {}).get("code", ""),
         global_rank_taiko=stats.get("global_rank"),
     )

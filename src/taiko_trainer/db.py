@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS player_info (
     osu_user_id         INTEGER,
     osu_username        TEXT,
     osu_avatar_url      TEXT,
+    osu_cover_url       TEXT,
     osu_country_code    TEXT,
     osu_global_rank     INTEGER
 );
@@ -210,6 +211,7 @@ def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
         ("osu_user_id",      "ALTER TABLE player_info ADD COLUMN osu_user_id INTEGER"),
         ("osu_username",     "ALTER TABLE player_info ADD COLUMN osu_username TEXT"),
         ("osu_avatar_url",   "ALTER TABLE player_info ADD COLUMN osu_avatar_url TEXT"),
+        ("osu_cover_url",    "ALTER TABLE player_info ADD COLUMN osu_cover_url TEXT"),
         ("osu_country_code", "ALTER TABLE player_info ADD COLUMN osu_country_code TEXT"),
         ("osu_global_rank",  "ALTER TABLE player_info ADD COLUMN osu_global_rank INTEGER"),
     ):
@@ -379,11 +381,12 @@ def get_player(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None:
 def set_osu_profile(
     conn: sqlite3.Connection,
     name: str,
-    user_id: int,
-    username: str,
-    avatar_url: str,
-    country_code: str,
+    user_id: int | None,
+    username: str | None,
+    avatar_url: str | None,
+    country_code: str | None,
     global_rank: int | None,
+    cover_url: str | None = None,
 ) -> None:
     """Link an osu! profile (from osu_api.lookup_user) to a player."""
     conn.execute(
@@ -392,12 +395,13 @@ def set_osu_profile(
             osu_user_id = ?,
             osu_username = ?,
             osu_avatar_url = ?,
+            osu_cover_url = ?,
             osu_country_code = ?,
             osu_global_rank = ?,
             updated_at = ?
         WHERE name = ?
         """,
-        (user_id, username, avatar_url, country_code, global_rank, _now(), name),
+        (user_id, username, avatar_url, cover_url, country_code, global_rank, _now(), name),
     )
     conn.commit()
 

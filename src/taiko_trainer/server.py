@@ -395,6 +395,7 @@ def create_app(workspace: str) -> FastAPI:
             user_id=user.id, username=user.username,
             avatar_url=user.avatar_url, country_code=user.country_code,
             global_rank=user.global_rank_taiko,
+            cover_url=user.cover_url,
         )
         conn.close()
         return RedirectResponse(url=f"/player/{player}?ok=osu-linked", status_code=303)
@@ -986,14 +987,22 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
         raw = history[-1].get("latest_replay_played_at", "")
         latest_date = raw[:10] if raw else ""
 
-    # Dark base with subtle warm/cool radial hotspots. Avatar is rendered as
-    # a separate portrait element in the hero-left column (see below) instead
-    # of dimmed as the full background — banner-shape doesn't fit a square
-    # avatar image and imitates the osu! profile-page layout better.
-    bg = ("background: "
-          "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
-          "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
-          "#16181D;")
+    # Cover image (osu! profile banner) if available — same dimming treatment
+    # as the beatmap cover. Otherwise dark base with subtle warm/cool radial
+    # hotspots. The avatar renders separately as a portrait next to the info.
+    cover_url = getattr(report, "osu_cover_url", None)
+    if cover_url:
+        bg = (
+            "background: "
+            "linear-gradient(180deg, rgba(15,17,20,0.35) 0%, rgba(15,17,20,0.92) 100%), "
+            f'url("{cover_url}"); '
+            "background-size: cover; background-position: center;"
+        )
+    else:
+        bg = ("background: "
+              "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
+              "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
+              "#16181D;")
     avatar_url = getattr(report, "osu_avatar_url", None)
     avatar_html = (
         f'<img class="hero-avatar" src="{avatar_url}" alt="{report.osu_username or player} avatar">'
