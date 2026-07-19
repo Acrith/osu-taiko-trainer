@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS replays (
     cheese_rate           REAL,
     fast_cheese_pairs     INTEGER,
     classification_json   TEXT,
+    miss_patterns_json    TEXT,
     inserted_at           TEXT NOT NULL,
     UNIQUE(map_md5, played_at)
 );
@@ -217,6 +218,9 @@ def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
     ):
         if col not in existing:
             conn.execute(ddl)
+    replays_existing = {r["name"] for r in conn.execute("PRAGMA table_info(replays)")}
+    if "miss_patterns_json" not in replays_existing:
+        conn.execute("ALTER TABLE replays ADD COLUMN miss_patterns_json TEXT")
     conn.commit()
 
 
@@ -450,6 +454,7 @@ def update_replay_judgment(
     judged: JudgedReplay,
     classification: FailureSummary | None,
     cheese: CheeseReport | None,
+    miss_patterns: list[dict] | None = None,
 ) -> None:
     """Overwrite the judged fields on an existing replay row (rejudge)."""
     deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
@@ -460,6 +465,7 @@ def update_replay_judgment(
     else:
         mean = stddev = None
     classification_json = json.dumps(classification.by_cause) if classification else None
+    miss_patterns_json = json.dumps(miss_patterns) if miss_patterns else None
     cheese_rate = cheese.cheese_rate if cheese else None
     fast_cheese = cheese.fast_cheese_pairs if cheese else None
     conn.execute(
@@ -469,7 +475,8 @@ def update_replay_judgment(
             count_great = ?, count_ok = ?, count_miss = ?,
             delta_mean_ms = ?, delta_stddev_ms = ?,
             cheese_rate = ?, fast_cheese_pairs = ?,
-            classification_json = ?
+            classification_json = ?,
+            miss_patterns_json = ?
         WHERE id = ?
         """,
         (
@@ -478,6 +485,7 @@ def update_replay_judgment(
             mean, stddev,
             cheese_rate, fast_cheese,
             classification_json,
+            miss_patterns_json,
             replay_id,
         ),
     )
@@ -493,6 +501,7 @@ def insert_replay(
     classification: FailureSummary | None = None,
     cheese: CheeseReport | None = None,
     deltas: list[int] | None = None,
+    miss_patterns: list[dict] | None = None,
 ) -> int:
     if deltas is None:
         deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
@@ -507,6 +516,7 @@ def insert_replay(
     acc_r = (replay.meta.count_300 + 0.5 * replay.meta.count_100) / total_r if total_r else 0.0
 
     classification_json = json.dumps(classification.by_cause) if classification else None
+    miss_patterns_json = json.dumps(miss_patterns) if miss_patterns else None
     cheese_rate = cheese.cheese_rate if cheese else None
     fast_cheese = cheese.fast_cheese_pairs if cheese else None
 
@@ -519,8 +529,9 @@ def insert_replay(
             delta_mean_ms, delta_stddev_ms,
             cheese_rate, fast_cheese_pairs,
             classification_json,
+            miss_patterns_json,
             inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             map_md5, replay_content,
@@ -531,6 +542,7 @@ def insert_replay(
             mean, stddev,
             cheese_rate, fast_cheese,
             classification_json,
+            miss_patterns_json,
             _now(),
         ),
     )
@@ -552,7 +564,7 @@ def get_replays(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                r.count_great, r.count_ok, r.count_miss,
                r.delta_mean_ms, r.delta_stddev_ms,
                r.cheese_rate, r.fast_cheese_pairs,
-               r.classification_json, r.inserted_at,
+               r.classification_json, r.miss_patterns_json, r.inserted_at,
                m.title AS map_title, m.version AS map_version, m.creator AS map_creator,
                m.beatmap_id, m.beatmapset_id,
                m.rating_speed, m.rating_stamina, m.rating_gimmick,

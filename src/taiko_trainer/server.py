@@ -547,6 +547,19 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .contrib-map .muted { color: var(--ink-faint); }
 .contrib-val { color: var(--ink); font-weight: 500; }
 .contrib-meta { color: var(--ink-faint); font-size: 10px; }
+/* --- weakness pattern list --- */
+.weakness-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.weakness-row { display: grid; grid-template-columns: 140px 1fr max-content; gap: 12px; align-items: center; padding: 10px 4px; border-bottom: 1px dashed var(--rule); font-family: var(--font-mono); }
+.weakness-row:last-child { border-bottom: none; }
+.weakness-cause { padding: 4px 10px; border-radius: 3px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink); text-align: center; }
+.weakness-sig { font-size: 13px; color: var(--ink); font-weight: 500; }
+.weakness-maps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.weakness-map-chip { font-size: 10px; padding: 2px 8px; background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-muted); text-decoration: none; }
+.weakness-map-chip:hover { color: var(--accent); border-color: var(--accent-soft); }
+.weakness-map-chip .muted { color: var(--ink-faint); }
+.weakness-count { font-family: var(--font-mono); font-size: 16px; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
+.weakness-count .muted { font-size: 10px; color: var(--ink-muted); display: block; }
+
 /* --- osu! profile link section --- */
 .osu-link-linked { display: flex; align-items: center; gap: 16px; padding-top: 8px; }
 .osu-link-avatar { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; border: 1px solid var(--rule); }
@@ -881,6 +894,46 @@ _STYLE_BADGE = {
     "kkdd": ("KKDD", "L=kat, R=don (color-per-hand)"),
     "unknown": ("STYLE?", "playstyle not set"),
 }
+
+def _render_weakness_patterns(report, player: str) -> str:
+    """Cluster the misses across the player's BEST play of each map by pattern
+    signature. Surfaces genuine weaknesses evidenced by consistent misses across
+    stable records, not one-off bad plays."""
+    clusters = getattr(report, "weakness_clusters", ()) or ()
+    if not clusters:
+        return (
+            '<section class="card"><h2>Weakness patterns</h2>'
+            '<p class="hint">No pattern data yet. Upload replays (or run <code>refresh</code>) and this section will surface the specific pattern signatures your misses cluster around.</p>'
+            '</section>'
+        )
+    total_misses = sum(c.miss_count for c in clusters)
+    rows_html = ""
+    for c in clusters:
+        pct = c.miss_count / total_misses * 100 if total_misses else 0
+        color = _CAUSE_COLORS.get(c.cause, "var(--ink-faint)")
+        # Small list of the maps where this pattern shows up (top 5, clickable
+        # to the replay detail).
+        map_chips = "  ".join(
+            f'<a class="weakness-map-chip" href="/replay/{player}/{rid}">{title[:22]} <span class="muted">[{ver[:14]}]</span></a>'
+            for (title, ver, rid) in c.maps
+        )
+        rows_html += (
+            f'<div class="weakness-row">'
+            f'<div class="weakness-cause" style="background: {color}20; border-left: 3px solid {color};">{c.cause.replace("_", "-")}</div>'
+            f'<div class="weakness-body">'
+            f'<div class="weakness-sig">{c.signature}</div>'
+            f'<div class="weakness-maps">{map_chips}</div>'
+            f'</div>'
+            f'<div class="weakness-count">{c.miss_count}<span class="muted"> misses · {pct:.0f}%</span></div>'
+            f'</div>'
+        )
+    return f"""
+  <section class="card">
+    <h2>Weakness patterns</h2>
+    <p class="hint">Top pattern signatures where your misses cluster, aggregated across the best play of each map. These are the patterns your play history says you genuinely struggle with — improving them moves your accuracy more than random grind.</p>
+    <div class="weakness-list">{rows_html}</div>
+  </section>"""
+
 
 def _render_player_flash(flash_ok: str, flash_err: str) -> str:
     """Small banner above the hero for osu! link outcomes."""
@@ -1708,6 +1761,8 @@ def _render_report(report, replays: list[dict] | None = None, player_name: str |
     <h2>Dominant miss causes (all replays)</h2>
     {causes_html or "<p class='hint'>No classified misses.</p>"}
   </section>
+
+  {_render_weakness_patterns(report, player_name or report.player)}
 
   {_render_replays_table(replays or [], player_name or report.player)}
 

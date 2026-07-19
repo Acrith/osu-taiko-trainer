@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from .cheese import detect_cheese
-from .classification import classify_failures, summarize_failures
+from .classification import classify_failures, extract_miss_patterns, summarize_failures
 from .db import (
     catalog_path,
     discover_players,
@@ -157,8 +157,9 @@ def refresh_ratings(workspace: str) -> None:
                 judged = judge_replay(bm, rp)
                 classes = classify_failures(judged, bm, feats)
                 summary = summarize_failures(classes)
+                miss_patterns = extract_miss_patterns(classes, bm.hittable())
                 cheese = detect_cheese(judged)
-                update_replay_judgment(conn, r["id"], judged, summary, cheese)
+                update_replay_judgment(conn, r["id"], judged, summary, cheese, miss_patterns)
                 rejudged += 1
             except Exception as e:
                 print(f"  {player}: rejudge SKIP replay #{r['id']}: {e}")

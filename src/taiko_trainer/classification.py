@@ -246,6 +246,72 @@ class FailureSummary:
     ok_by_cause: dict[str, int]
 
 
+def extract_miss_patterns(
+    classifications: tuple[FailureClassification, ...],
+    hittable,
+) -> list[dict]:
+    """For each MISS classification, capture the pattern context needed to
+    cluster weaknesses across the player's play history. One record per miss:
+
+        t         note time_ms (for linking back to the replay)
+        bpm       local BPM at this note
+        color     'D' | 'K'
+        size      'sm' | 'big'
+        cause     primary FailureCause value (e.g. 'technical')
+        prev_div  incoming gap divisor ('1/6', '1/4', 'other', None)
+        next_div  outgoing gap divisor
+        run_len   length of the same-color mono run this note is in
+        run_pos   0-indexed position within that run
+
+    These get stored per-replay as JSON and re-aggregated at report time to
+    surface the specific pattern signatures a player struggles with."""
+    if not classifications or not hittable:
+        return []
+
+    time_to_idx = {n.time_ms: i for i, n in enumerate(hittable)}
+    # Precompute gap divisors + run info per note.
+    gap_divisors: list[str | None] = []
+    for i in range(len(hittable) - 1):
+        gap_divisors.append(
+            _local_divisor(hittable[i + 1].time_ms - hittable[i].time_ms, hittable[i].bpm)
+        )
+    run_len: list[int] = [0] * len(hittable)
+    run_pos: list[int] = [0] * len(hittable)
+    i = 0
+    while i < len(hittable):
+        j = i
+        while j + 1 < len(hittable) and hittable[j + 1].note_type.is_don == hittable[i].note_type.is_don:
+            j += 1
+        length = j - i + 1
+        for k, idx in enumerate(range(i, j + 1)):
+            run_len[idx] = length
+            run_pos[idx] = k
+        i = j + 1
+
+    records: list[dict] = []
+    for cls in classifications:
+        if cls.judgment.verdict is not Verdict.MISS:
+            continue
+        note = cls.judgment.note
+        idx = time_to_idx.get(note.time_ms, -1)
+        if idx < 0:
+            continue
+        prev_div = gap_divisors[idx - 1] if idx > 0 else None
+        next_div = gap_divisors[idx] if idx < len(gap_divisors) else None
+        records.append({
+            "t": note.time_ms,
+            "bpm": round(note.bpm, 1),
+            "color": "D" if note.note_type.is_don else "K",
+            "size": "big" if note.note_type.is_big else "sm",
+            "cause": cls.primary.value,
+            "prev_div": prev_div,
+            "next_div": next_div,
+            "run_len": run_len[idx],
+            "run_pos": run_pos[idx],
+        })
+    return records
+
+
 def summarize_failures(classifications: tuple[FailureClassification, ...]) -> FailureSummary:
     by_cause: dict[str, int] = {c.value: 0 for c in FailureCause}
     miss_by: dict[str, int] = {c.value: 0 for c in FailureCause}

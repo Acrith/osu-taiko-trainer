@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import db as db_module
 from .cheese import detect_cheese
-from .classification import classify_failures, summarize_failures
+from .classification import classify_failures, extract_miss_patterns, summarize_failures
 from .db import (
     add_map_root as db_add_map_root,
     get_map,
@@ -309,6 +309,7 @@ def add_replay(
     _report("classify", note=f"classifying {judged.count_miss} misses")
     classifications = classify_failures(judged, bm, features)
     summary = summarize_failures(classifications)
+    miss_patterns = extract_miss_patterns(classifications, bm.hittable())
     cheese = detect_cheese(judged)
 
     _report("store", note="writing to database")
@@ -316,6 +317,7 @@ def add_replay(
         plays, rp, judged, target_md5, replay_content,
         classification=summary,
         cheese=cheese,
+        miss_patterns=miss_patterns,
     )
 
     # Recompute the player's snapshot including the new replay.

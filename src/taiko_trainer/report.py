@@ -21,6 +21,17 @@ from .suggest import MapSuggestion, find_weakest_dim, suggest_maps
 
 
 @dataclass(frozen=True)
+class WeaknessCluster:
+    """A pattern signature the player misses on disproportionately, evidenced
+    across their play history (deduped per-map so we only look at their best
+    play of each map, matching the skill-vector semantics)."""
+    cause: str                     # primary FailureCause (technical, gimmick, etc.)
+    signature: str                 # human-readable pattern description
+    miss_count: int                # total misses in this cluster across best plays
+    maps: tuple[tuple[str, str, int], ...]  # (title, version, replay_id) tuples showing the maps
+
+
+@dataclass(frozen=True)
 class SkillContribution:
     map_title: str
     map_diff: str
@@ -49,6 +60,7 @@ class TrainingReport:
     previous_session: Session | None
     dim_contributors: dict[str, tuple[SkillContribution, ...]] = None  # top-5 per dim
     snapshot_history: tuple[dict, ...] = ()  # snapshots oldest -> newest for the progression chart
+    weakness_clusters: tuple[WeaknessCluster, ...] = ()  # top pattern signatures the player struggles with
     # osu! profile fields (populated from player_info if linked via /settings/osu-user)
     osu_user_id: int | None = None
     osu_username: str | None = None
@@ -155,6 +167,7 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
         previous_session=previous_session,
         dim_contributors=_compute_dim_contributors(replays),
         snapshot_history=snapshot_history,
+        weakness_clusters=_compute_weakness_clusters(replays),
     )
 
 
@@ -199,6 +212,102 @@ def _compute_dim_contributors(replays: list[dict], top_n: int = 5) -> dict[str, 
             ))
         result[dim] = tuple(contribs)
     return result
+
+
+def _bpm_band(bpm: float) -> str:
+    if bpm < 140: return "<140"
+    if bpm < 160: return "140-160"
+    if bpm < 180: return "160-180"
+    if bpm < 200: return "180-200"
+    if bpm < 220: return "200-220"
+    return "220+"
+
+
+def _run_len_band(n: int) -> str:
+    if n <= 1: return "1"
+    if n <= 3: return "2-3"
+    if n <= 5: return "4-5"
+    if n <= 7: return "6-7"
+    return "8+"
+
+
+def _pattern_signature(cause: str, m: dict) -> str:
+    """Turn a per-miss record into a human-readable pattern signature. The
+    signature drives the group-by for weakness clustering — misses that share
+    a signature roll up into one cluster."""
+    bpm_b = _bpm_band(m.get("bpm", 0))
+    prev = m.get("prev_div") or "?"
+    nxt = m.get("next_div") or "?"
+    rl = _run_len_band(m.get("run_len", 0))
+    if cause == "technical":
+        # For technical: focus on hard divisor around the miss
+        hard = ""
+        if prev in ("1/6", "1/3", "1/8", "1/12"): hard = prev
+        elif nxt in ("1/6", "1/3", "1/8", "1/12"): hard = nxt
+        return f"{hard or 'mixed'} at {bpm_b} BPM" if hard else f"hard-divisor at {bpm_b} BPM"
+    if cause == "pattern_parity":
+        return f"length-{rl} run at {bpm_b} BPM"
+    if cause == "gimmick":
+        return f"SV shift at {bpm_b} BPM"
+    if cause == "stamina":
+        return f"length-{rl} at {bpm_b} BPM (late-map)"
+    if cause == "speed":
+        return f"1/4 at {bpm_b} BPM"
+    if cause == "wrong_color":
+        c = m.get("color", "?")
+        return f"{c} on length-{rl} at {bpm_b} BPM"
+    if cause == "consistency":
+        return f"drift on 1/4 at {bpm_b} BPM"
+    return f"{bpm_b} BPM · {prev}→{nxt}"
+
+
+def _compute_weakness_clusters(replays: list[dict], top_n: int = 8) -> tuple:
+    """For each map, keep only the best-acc replay (matches the skill-vector
+    dedup). Aggregate the miss patterns across best plays by (cause, signature),
+    surface the top-N clusters by miss count.
+
+    The insight: your BEST play of each map is a stable data point about your
+    skill. If you consistently miss the same pattern signature across your best
+    plays on multiple maps, that's a genuine weakness worth training."""
+    import json as _json
+    best_per_map: dict[str, dict] = {}
+    for r in replays:
+        md5 = r.get("map_md5") or ""
+        acc = r.get("accuracy_judged") or 0.0
+        cur = best_per_map.get(md5)
+        if cur is None or acc > (cur.get("accuracy_judged") or 0.0):
+            best_per_map[md5] = r
+
+    # Aggregate: (cause, signature) -> [miss records + originating replay refs]
+    clusters: dict[tuple[str, str], dict] = {}
+    for r in best_per_map.values():
+        raw = r.get("miss_patterns_json")
+        if not raw:
+            continue
+        try:
+            patterns = _json.loads(raw)
+        except Exception:
+            continue
+        for m in patterns:
+            cause = m.get("cause") or "unknown"
+            sig = _pattern_signature(cause, m)
+            key = (cause, sig)
+            slot = clusters.setdefault(key, {"count": 0, "maps": {}})
+            slot["count"] += 1
+            map_key = (r.get("map_title") or "?", r.get("map_version") or "?", int(r["id"]))
+            slot["maps"][map_key] = slot["maps"].get(map_key, 0) + 1
+
+    # Sort by miss count desc; return top-N.
+    ordered = sorted(clusters.items(), key=lambda kv: -kv[1]["count"])[:top_n]
+    return tuple(
+        WeaknessCluster(
+            cause=cause,
+            signature=sig,
+            miss_count=data["count"],
+            maps=tuple(k for k, _ in sorted(data["maps"].items(), key=lambda kv: -kv[1])[:5]),
+        )
+        for (cause, sig), data in ordered
+    )
 
 
 _STYLE_LABELS = {
