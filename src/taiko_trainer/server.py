@@ -23,9 +23,10 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Cookie, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from . import auth as auth_module
 from . import db as db_module
 from .db import (
     discover_players,
@@ -34,10 +35,13 @@ from .db import (
     get_map_content,
     get_player,
     get_replays,
+    get_user_by_id,
+    get_user_by_username,
     list_map_roots,
     open_catalog,
     open_plays,
     upsert_player,
+    upsert_user_from_osu,
     workspace_status,
 )
 from .features import extract_features
@@ -102,6 +106,118 @@ def _upload_progress_cb(task_id: str):
 
 def create_app(workspace: str) -> FastAPI:
     app = FastAPI(title="taiko-trainer")
+
+    # Force auth config to load at startup so misconfigured web mode fails
+    # fast instead of silently issuing broken sessions.
+    if auth_module.is_web_mode():
+        auth_module.config()
+        print("[auth] running in WEB mode (osu! OAuth login enabled)", flush=True)
+    else:
+        print("[auth] running in LOCAL mode (single implicit user)", flush=True)
+
+    # --- Auth routes (web mode) ------------------------------------------
+    # These are always registered so the endpoints exist regardless of mode,
+    # but they only do meaningful work in web mode. In local mode /login is
+    # a no-op that redirects home.
+
+    @app.get("/login")
+    def login():
+        """Kick off osu! OAuth flow. Sets a signed state cookie and 302s to
+        the osu! authorization endpoint. In local mode there's no login to
+        perform — bounce home."""
+        if not auth_module.is_web_mode():
+            return RedirectResponse(url="/", status_code=302)
+        state = auth_module.make_state_token()
+        resp = RedirectResponse(url=auth_module.authorize_url(state), status_code=302)
+        resp.set_cookie(
+            key=auth_module.STATE_COOKIE_NAME,
+            value=state,
+            max_age=auth_module.STATE_MAX_AGE_S,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/",
+        )
+        return resp
+
+    @app.get("/oauth/callback")
+    def oauth_callback(
+        code: str | None = None,
+        state: str | None = None,
+        error: str | None = None,
+        state_cookie: str | None = Cookie(default=None, alias=auth_module.STATE_COOKIE_NAME),
+    ):
+        """osu! redirects here after user consent. Verify state, exchange
+        code for a user access token, fetch /me/taiko, upsert users row,
+        issue session cookie, redirect to /me."""
+        if not auth_module.is_web_mode():
+            return RedirectResponse(url="/", status_code=302)
+        if error:
+            return HTMLResponse(_render_error(f"osu! login was cancelled or failed: {error}"), status_code=400)
+        if not code:
+            return HTMLResponse(_render_error("osu! callback missing authorization code"), status_code=400)
+        # CSRF: state param must match the one we set in the cookie AND be a
+        # valid signed token (unforgeable + freshness-bounded).
+        if not state or state != state_cookie or not auth_module.verify_state_token(state):
+            return HTMLResponse(_render_error("Login state check failed. Try again."), status_code=400)
+
+        try:
+            me = auth_module.exchange_code_for_user(code)
+        except Exception as e:
+            return HTMLResponse(_render_error(f"osu! login failed: {e}"), status_code=502)
+
+        cat = open_catalog(workspace)
+        user_id = upsert_user_from_osu(
+            cat,
+            osu_user_id=me.id,
+            osu_username=me.username,
+            osu_avatar_url=me.avatar_url,
+            osu_cover_url=me.cover_url,
+            osu_country_code=me.country_code,
+            osu_global_rank=me.global_rank_taiko,
+        )
+        cat.close()
+
+        cookie = auth_module.make_session_cookie(user_id)
+        resp = RedirectResponse(url="/me", status_code=302)
+        resp.set_cookie(
+            key=auth_module.SESSION_COOKIE_NAME,
+            value=cookie,
+            max_age=auth_module.SESSION_MAX_AGE_S,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/",
+        )
+        # Drop the one-shot state cookie now that we've consumed it.
+        resp.delete_cookie(key=auth_module.STATE_COOKIE_NAME, path="/")
+        return resp
+
+    @app.post("/logout")
+    def logout():
+        resp = RedirectResponse(url="/", status_code=302)
+        resp.delete_cookie(key=auth_module.SESSION_COOKIE_NAME, path="/")
+        return resp
+
+    @app.get("/me")
+    def me(session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME)):
+        """Redirect to the logged-in user's public page. In local mode there
+        is no /me — send them home. In web mode without a session cookie,
+        bounce to /login."""
+        if not auth_module.is_web_mode():
+            return RedirectResponse(url="/", status_code=302)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        cat = open_catalog(workspace)
+        user = get_user_by_id(cat, uid)
+        cat.close()
+        if not user:
+            # Session references a deleted user — clear cookie + send home.
+            resp = RedirectResponse(url="/", status_code=302)
+            resp.delete_cookie(key=auth_module.SESSION_COOKIE_NAME, path="/")
+            return resp
+        return RedirectResponse(url=f"/u/{user['osu_username']}", status_code=302)
 
     # --- HTML pages ------------------------------------------------------
 

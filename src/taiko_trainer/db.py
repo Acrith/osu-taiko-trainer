@@ -76,6 +76,26 @@ CREATE TABLE IF NOT EXISTS catalog_meta (
     value                  TEXT NOT NULL,
     updated_at             TEXT NOT NULL
 );
+
+-- Users table for the hosted web build (Task #63, feature branch `web`).
+-- Populated by osu! OAuth login. In local mode this table stays empty
+-- and the tool falls back to the implicit single-user path.
+CREATE TABLE IF NOT EXISTS users (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    osu_user_id            INTEGER UNIQUE NOT NULL,
+    osu_username           TEXT NOT NULL,
+    osu_avatar_url         TEXT,
+    osu_cover_url          TEXT,
+    osu_country_code       TEXT,
+    osu_global_rank        INTEGER,
+    style                  TEXT NOT NULL DEFAULT 'unknown',
+    profile_public         INTEGER NOT NULL DEFAULT 1,
+    created_at             TEXT NOT NULL,
+    last_login_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_osu_id ON users(osu_user_id);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(osu_username);
 """
 
 
@@ -447,6 +467,72 @@ def set_osu_profile(
         (user_id, username, avatar_url, cover_url, country_code, global_rank, _now(), name),
     )
     conn.commit()
+
+
+# -----------------------------------------------------------------------------
+# Users (web mode) — one row per authenticated osu! account.
+# -----------------------------------------------------------------------------
+
+def upsert_user_from_osu(
+    conn: sqlite3.Connection,
+    osu_user_id: int,
+    osu_username: str,
+    osu_avatar_url: str = "",
+    osu_cover_url: str = "",
+    osu_country_code: str = "",
+    osu_global_rank: int | None = None,
+) -> int:
+    """Insert or refresh the users row for this osu! account. Returns the
+    users.id (local primary key), which is what session cookies carry.
+
+    Refreshes username/avatar/cover on every login — osu! profile can change,
+    and stale display data is a bad user experience."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    now = _now()
+    conn.execute(
+        f"""
+        INSERT INTO {schema}.users (
+            osu_user_id, osu_username, osu_avatar_url, osu_cover_url,
+            osu_country_code, osu_global_rank,
+            created_at, last_login_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(osu_user_id) DO UPDATE SET
+            osu_username     = excluded.osu_username,
+            osu_avatar_url   = excluded.osu_avatar_url,
+            osu_cover_url    = excluded.osu_cover_url,
+            osu_country_code = excluded.osu_country_code,
+            osu_global_rank  = excluded.osu_global_rank,
+            last_login_at    = excluded.last_login_at
+        """,
+        (
+            osu_user_id, osu_username, osu_avatar_url, osu_cover_url,
+            osu_country_code, osu_global_rank,
+            now, now,
+        ),
+    )
+    row = conn.execute(
+        f"SELECT id FROM {schema}.users WHERE osu_user_id = ?", (osu_user_id,)
+    ).fetchone()
+    conn.commit()
+    return int(row["id"])
+
+
+def get_user_by_id(conn: sqlite3.Connection, user_id: int) -> dict[str, Any] | None:
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    row = conn.execute(
+        f"SELECT * FROM {schema}.users WHERE id = ?", (user_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, Any] | None:
+    """Case-insensitive lookup by osu_username. Used for /u/{username} routes."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    row = conn.execute(
+        f"SELECT * FROM {schema}.users WHERE LOWER(osu_username) = LOWER(?)",
+        (username,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def add_map_root(conn: sqlite3.Connection, path: str) -> None:
