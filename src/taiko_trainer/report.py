@@ -135,6 +135,7 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
             "gimmick":     skill.gimmick     - prev["skill_gimmick"],
             "technical":   skill.technical   - prev["skill_technical"],
             "consistency": skill.consistency - prev["skill_consistency"],
+            "reading":     skill.reading     - (prev["skill_reading"] or 0),
         }
         prev_snapshot_at = prev["latest_replay_played_at"]
 
@@ -171,7 +172,7 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
     )
 
 
-_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency")
+_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
 
 
 def _compute_dim_contributors(replays: list[dict], top_n: int = 5) -> dict[str, tuple[SkillContribution, ...]]:

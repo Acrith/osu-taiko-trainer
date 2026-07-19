@@ -148,7 +148,7 @@ def create_app(workspace: str) -> FastAPI:
 
     @app.get("/player/{name}/train/{dim}", response_class=HTMLResponse)
     def train_page(name: str, dim: str):
-        if dim not in ("speed", "stamina", "gimmick", "technical", "consistency"):
+        if dim not in ("speed", "stamina", "gimmick", "technical", "consistency", "reading"):
             return HTMLResponse(_render_error(f"unknown dimension: {dim}"), status_code=400)
         conn = open_plays(workspace, name)
         report = build_report(conn, top_n_maps=25)
@@ -1143,7 +1143,7 @@ def _render_skill_radar(report, player: str) -> str:
     a click-through to /player/{name}/train/{dim}."""
     import math as _math
 
-    dims = ("speed", "stamina", "gimmick", "technical", "consistency")
+    dims = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
     d = report.skill.as_dict()
     max_val = max(d.values()) or 1
 
@@ -1153,8 +1153,8 @@ def _render_skill_radar(report, player: str) -> str:
     cx, cy = W / 2, H / 2 - 6
     r_max = 130
 
-    # 5 axes at 72° intervals, SPEED at top
-    angles = {dim: -_math.pi/2 + i * (2*_math.pi/5) for i, dim in enumerate(dims)}
+    # 6 axes at 60° intervals, SPEED at top.
+    angles = {dim: -_math.pi/2 + i * (2*_math.pi/6) for i, dim in enumerate(dims)}
 
     def pt(dim, r):
         a = angles[dim]
@@ -1426,6 +1426,7 @@ _CAUSE_COLORS = {
     "technical": "var(--accent-cool)",
     "gimmick": "#B060B0",
     "consistency": "var(--great)",
+    "reading": "#e8a43a",       # amber — matches the "reading pressure" mods chip
     "unknown": "var(--ink-faint)",
 }
 
@@ -2111,7 +2112,7 @@ def _render_inspector(row: dict, player: str, judged, replay) -> str:
     return _html_page(f"inspect #{row['id']}", body)
 
 
-_PROGRESSION_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency")
+_PROGRESSION_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
 
 def _render_progression_chart(history: tuple) -> str:
     """5 small multiples of the skill vector across sessions. Each dimension
@@ -2134,7 +2135,8 @@ def _render_progression_chart(history: tuple) -> str:
 
     columns = []
     for dim in _PROGRESSION_DIMS:
-        vals = [s[f"skill_{dim}"] for s in history]
+        # Coerce None -> 0 for skill_reading on pre-migration snapshots.
+        vals = [(s[f"skill_{dim}"] or 0.0) for s in history]
         vmax = max(vals) or 1
         vmin = min(vals)
         # Pad the y-range 5% either side so lines don't touch the edges,
@@ -2201,9 +2203,10 @@ def _fmt_gain(gain: float) -> str:
 _DIM_TAGLINE = {
     "speed":       "motor tempo — how fast your hands alternate",
     "stamina":     "endurance — long high-density stretches without dropping",
-    "gimmick":     "reading pressure — SV variance, obscured densities",
+    "gimmick":     "chaotic SV — unpredictable scroll manipulations to read",
     "technical":   "pattern awareness — mono runs, mixed divisors, parity",
     "consistency": "unwavering timing — no random drops from bursts / parity flips",
+    "reading":     "base scroll velocity — fast reaction time on high-SV / high-BPM",
 }
 
 
@@ -2363,6 +2366,7 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
         c_gimmick     = (r.get("rating_gimmick") or 0) * acc_scale
         c_technical   = (r.get("rating_technical") or 0) * acc_scale
         c_consistency = (r.get("rating_consistency") or 0) * acc_scale
+        c_reading     = (r.get("rating_reading") or 0) * acc_scale
         # data-* used by client-side sort + filter
         raw_played = (r.get("played_at") or "").replace("T", " ")
         title_lc = title.lower() + " " + version.lower()
@@ -2371,7 +2375,7 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
             f'data-idx="{idx}" data-title="{title_lc}" data-date="{raw_played}" '
             f'data-c-speed="{c_speed:.1f}" data-c-stamina="{c_stamina:.1f}" '
             f'data-c-gimmick="{c_gimmick:.1f}" data-c-technical="{c_technical:.1f}" '
-            f'data-c-consistency="{c_consistency:.1f}" '
+            f'data-c-consistency="{c_consistency:.1f}" data-c-reading="{c_reading:.1f}" '
             f'style="cursor:pointer">'
             f'<td class="name">{badge}{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span>{_mods_chip(r.get("mods_label"))}</td>'
             f'<td class="muted">{played}</td>'
@@ -2393,6 +2397,7 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
         <button class="tab" data-sort="c-gimmick">Top gimmick</button>
         <button class="tab" data-sort="c-technical">Top technical</button>
         <button class="tab" data-sort="c-consistency">Top consistency</button>
+        <button class="tab" data-sort="c-reading">Top reading</button>
       </div>
       <input type="search" class="replay-search" placeholder="filter map title…" aria-label="search replays">
     </div>

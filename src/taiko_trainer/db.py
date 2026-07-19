@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS maps (
     rating_gimmick         REAL NOT NULL,
     rating_technical       REAL NOT NULL,
     rating_consistency     REAL NOT NULL,
+    rating_reading         REAL,
     parity_mean            REAL NOT NULL,
     parity_hostile_ratio   REAL NOT NULL,
     inserted_at            TEXT NOT NULL
@@ -118,6 +119,7 @@ CREATE TABLE IF NOT EXISTS replays (
     rating_gimmick_eff     REAL,
     rating_technical_eff   REAL,
     rating_consistency_eff REAL,
+    rating_reading_eff     REAL,
     inserted_at           TEXT NOT NULL,
     UNIQUE(map_md5, played_at)
 );
@@ -134,7 +136,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     skill_stamina            REAL NOT NULL,
     skill_gimmick            REAL NOT NULL,
     skill_technical          REAL NOT NULL,
-    skill_consistency        REAL NOT NULL
+    skill_consistency        REAL NOT NULL,
+    skill_reading            REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_time ON snapshots(computed_at DESC);
@@ -180,8 +183,17 @@ def open_catalog(workspace: str | Path = DEFAULT_WORKSPACE) -> sqlite3.Connectio
     conn = sqlite3.connect(str(p))
     conn.row_factory = sqlite3.Row
     conn.executescript(_CATALOG_SCHEMA)
+    _migrate_catalog_schema(conn)
     conn.commit()
     return conn
+
+
+def _migrate_catalog_schema(conn: sqlite3.Connection) -> None:
+    """Add columns that were introduced after the initial catalog schema."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(maps)")}
+    if "rating_reading" not in existing:
+        conn.execute("ALTER TABLE maps ADD COLUMN rating_reading REAL")
+    conn.commit()
 
 
 def open_plays(workspace: str | Path, player: str) -> sqlite3.Connection:
@@ -237,9 +249,13 @@ def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
         ("rating_gimmick_eff",     "ALTER TABLE replays ADD COLUMN rating_gimmick_eff REAL"),
         ("rating_technical_eff",   "ALTER TABLE replays ADD COLUMN rating_technical_eff REAL"),
         ("rating_consistency_eff", "ALTER TABLE replays ADD COLUMN rating_consistency_eff REAL"),
+        ("rating_reading_eff",     "ALTER TABLE replays ADD COLUMN rating_reading_eff REAL"),
     ):
         if col not in replays_existing:
             conn.execute(ddl)
+    snap_existing = {r["name"] for r in conn.execute("PRAGMA table_info(snapshots)")}
+    if "skill_reading" not in snap_existing:
+        conn.execute("ALTER TABLE snapshots ADD COLUMN skill_reading REAL")
     conn.commit()
 
 
@@ -288,9 +304,10 @@ def upsert_map(
             artist, title, version, creator, beatmap_id, beatmapset_id,
             mode, duration_s, hittable_notes, bpm_min, bpm_max, od,
             rating_speed, rating_stamina, rating_gimmick, rating_technical, rating_consistency,
+            rating_reading,
             parity_mean, parity_hostile_ratio,
             inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             beatmap.beatmap_md5, content,
@@ -302,6 +319,7 @@ def upsert_map(
             features.movement.bpm_min, features.movement.bpm_max,
             beatmap.difficulty.overall_difficulty,
             r["speed"], r["stamina"], r["gimmick"], r["technical"], r["consistency"],
+            r.get("reading", 0.0),
             features.parity.mean, features.parity.hostile_ratio,
             _now(),
         ),
@@ -342,6 +360,7 @@ def get_all_maps(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         f"""SELECT md5, artist, title, version, creator, beatmap_id, beatmapset_id,
                    mode, duration_s, hittable_notes, bpm_min, bpm_max, od,
                    rating_speed, rating_stamina, rating_gimmick, rating_technical, rating_consistency,
+                   COALESCE(rating_reading, 0) AS rating_reading,
                    parity_mean, parity_hostile_ratio, inserted_at
             FROM {schema}.maps"""
     ).fetchall()
@@ -354,6 +373,7 @@ def get_map(conn: sqlite3.Connection, md5: str) -> dict[str, Any] | None:
         f"""SELECT md5, artist, title, version, creator, beatmap_id, beatmapset_id,
                    mode, duration_s, hittable_notes, bpm_min, bpm_max, od,
                    rating_speed, rating_stamina, rating_gimmick, rating_technical, rating_consistency,
+                   COALESCE(rating_reading, 0) AS rating_reading,
                    parity_mean, parity_hostile_ratio, inserted_at
             FROM {schema}.maps WHERE md5 = ?""",
         (md5,),
@@ -508,7 +528,7 @@ def update_replay_judgment(
             mods_bitfield = ?, mods_label = ?,
             rating_speed_eff = ?, rating_stamina_eff = ?,
             rating_gimmick_eff = ?, rating_technical_eff = ?,
-            rating_consistency_eff = ?
+            rating_consistency_eff = ?, rating_reading_eff = ?
         WHERE id = ?
         """,
         (
@@ -524,6 +544,7 @@ def update_replay_judgment(
             er.gimmick if er else None,
             er.technical if er else None,
             er.consistency if er else None,
+            er.reading if er else None,
             replay_id,
         ),
     )
@@ -575,8 +596,9 @@ def insert_replay(
             mods_bitfield, mods_label,
             rating_speed_eff, rating_stamina_eff,
             rating_gimmick_eff, rating_technical_eff, rating_consistency_eff,
+            rating_reading_eff,
             inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             map_md5, replay_content,
@@ -594,6 +616,7 @@ def insert_replay(
             er.gimmick if er else None,
             er.technical if er else None,
             er.consistency if er else None,
+            er.reading if er else None,
             _now(),
         ),
     )
@@ -625,6 +648,7 @@ def get_replays(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                m.rating_gimmick AS rating_gimmick_base,
                m.rating_technical AS rating_technical_base,
                m.rating_consistency AS rating_consistency_base,
+               COALESCE(m.rating_reading, 0)  AS rating_reading_base,
                -- Effective ratings: mod-adjusted for DT/HR/etc, fall back to base for NM
                -- (or old records without eff columns populated). Everything downstream
                -- that used to read rating_* keeps working transparently.
@@ -632,7 +656,8 @@ def get_replays(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
                COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
                COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
-               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency
+               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency,
+               COALESCE(r.rating_reading_eff,     m.rating_reading, 0)  AS rating_reading
         FROM replays r
         LEFT JOIN catalog.maps m ON m.md5 = r.map_md5
         ORDER BY r.played_at DESC
@@ -691,12 +716,13 @@ def snapshot_player_skill(
                 latest_replay_played_at = ?,
                 replays_used = ?,
                 skill_speed = ?, skill_stamina = ?, skill_gimmick = ?,
-                skill_technical = ?, skill_consistency = ?
+                skill_technical = ?, skill_consistency = ?, skill_reading = ?
             WHERE id = ?
             """,
             (
                 _now(), latest_replay_played_at, replays_used,
                 skill.speed, skill.stamina, skill.gimmick, skill.technical, skill.consistency,
+                getattr(skill, "reading", 0.0),
                 latest["id"],
             ),
         )
@@ -708,12 +734,13 @@ def snapshot_player_skill(
         INSERT INTO snapshots (
             computed_at, latest_replay_played_at, replays_used,
             skill_speed, skill_stamina, skill_gimmick,
-            skill_technical, skill_consistency
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            skill_technical, skill_consistency, skill_reading
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             _now(), latest_replay_played_at, replays_used,
             skill.speed, skill.stamina, skill.gimmick, skill.technical, skill.consistency,
+            getattr(skill, "reading", 0.0),
         ),
     )
     conn.commit()
@@ -765,7 +792,8 @@ def rebuild_snapshots(conn: sqlite3.Connection, compute_skill_fn) -> int:
                COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
                COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
                COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
-               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency
+               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency,
+               COALESCE(r.rating_reading_eff,     m.rating_reading, 0)  AS rating_reading
         FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
         ORDER BY r.played_at ASC
         """
@@ -800,12 +828,13 @@ def rebuild_snapshots(conn: sqlite3.Connection, compute_skill_fn) -> int:
             INSERT INTO snapshots (
                 computed_at, latest_replay_played_at, replays_used,
                 skill_speed, skill_stamina, skill_gimmick,
-                skill_technical, skill_consistency
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                skill_technical, skill_consistency, skill_reading
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _now(), session_end_played_at, len(subset),
                 skill.speed, skill.stamina, skill.gimmick, skill.technical, skill.consistency,
+                getattr(skill, "reading", 0.0),
             ),
         )
         count += 1

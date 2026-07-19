@@ -43,6 +43,7 @@ class PlayerSkill:
     gimmick: float
     technical: float
     consistency: float
+    reading: float = 0.0    # scroll-speed / reaction skill
 
     def as_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -81,11 +82,11 @@ def compute_player_skill(performances: list[ReplayPerformance]) -> PlayerSkill:
     your total. Without this, re-uploading the same replay or grinding a map
     twice doubles its contribution to your skill number."""
     if not performances:
-        return PlayerSkill(0.0, 0.0, 0.0, 0.0, 0.0)
+        return PlayerSkill(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     # per_dim[dim][(title, diff)] = best contribution seen so far
     per_dim: dict[str, dict[tuple[str, str], float]] = {
-        "speed": {}, "stamina": {}, "gimmick": {}, "technical": {}, "consistency": {},
+        "speed": {}, "stamina": {}, "gimmick": {}, "technical": {}, "consistency": {}, "reading": {},
     }
     for p in performances:
         scale = _accuracy_scaling(p.accuracy)
@@ -106,4 +107,5 @@ def compute_player_skill(performances: list[ReplayPerformance]) -> PlayerSkill:
         gimmick=_weighted_top_sum(list(per_dim["gimmick"].values())),
         technical=_weighted_top_sum(list(per_dim["technical"].values())),
         consistency=_weighted_top_sum(list(per_dim["consistency"].values())),
+        reading=_weighted_top_sum(list(per_dim["reading"].values())),
     )

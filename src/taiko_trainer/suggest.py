@@ -31,7 +31,7 @@ from .player import PlayerSkill
 # catalog ATTACHed — both cases route reads to the `maps` table via get_all_maps.
 
 
-_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency")
+_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
 
 
 @dataclass(frozen=True)
@@ -105,6 +105,7 @@ def suggest_maps(
             "gimmick": m["rating_gimmick"],
             "technical": m["rating_technical"],
             "consistency": m["rating_consistency"],
+            "reading": m.get("rating_reading") or 0.0,
         }
         target_rating = map_ratings[target_dim]
         player_target = skill_d[target_dim]

@@ -98,6 +98,7 @@ def _row_to_perf(r) -> ReplayPerformance:
             speed=r["rating_speed"], stamina=r["rating_stamina"],
             gimmick=r["rating_gimmick"], technical=r["rating_technical"],
             consistency=r["rating_consistency"],
+            reading=r["rating_reading"] if "rating_reading" in r.keys() else 0.0,
         ),
         accuracy=r["accuracy_judged"], misses=r["count_miss"],
     )

@@ -775,6 +775,74 @@ def gimmick_profile(hittable: tuple[HitObject, ...], avg_nps: float, movement: M
     )
 
 
+# --- reading: base scroll velocity (how fast is the map visually?) ---------
+
+@dataclass(frozen=True)
+class ReadingProfile:
+    """Effective scroll velocity is what a player's eyes and hands have to
+    react to. It's roughly `BPM × SV_multiplier` on the note — a fast SV at
+    low BPM feels similar to a slow SV at high BPM. This is DISTINCT from
+    gimmick: gimmick captures chaotic/unpredictable SV, reading captures a
+    consistent-but-fast baseline scroll that just needs faster reaction.
+
+    velocity_p95        95th-percentile scroll velocity across hittable notes
+                        (uses percentile so one weird SV spike doesn't dominate)
+    velocity_dense_p95  same, but restricted to notes inside dense stretches
+                        (top ~20% NPS windows) — a fast SV during a rest is
+                        not testing reading
+    high_scroll_share   fraction of hittable notes above 350 units (moderate-
+                        difficulty scroll baseline) — captures how much of
+                        the map lives at high scroll
+    peak_velocity       max scroll velocity in a dense window — the worst
+                        single reading spike
+    """
+    velocity_p95: float
+    velocity_dense_p95: float
+    high_scroll_share: float
+    peak_velocity: float
+
+
+def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
+    if not hittable:
+        return ReadingProfile(0.0, 0.0, 0.0, 0.0)
+
+    # Per-note scroll velocity, clamped so SV=0 (invisible/gimmick) doesn't
+    # zero out and drag the percentile down.
+    velocities = [n.bpm * max(n.sv_multiplier, 0.25) for n in hittable]
+
+    # Local density around each note in a ±500ms window (same as gimmick_profile).
+    times = [n.time_ms for n in hittable]
+    n = len(times)
+    window_ms = 500
+    local_counts = [0] * n
+    lo = 0
+    hi = 0
+    for i in range(n):
+        while lo < n and times[lo] < times[i] - window_ms:
+            lo += 1
+        while hi < n and times[hi] <= times[i] + window_ms:
+            hi += 1
+        local_counts[i] = hi - lo
+    # Top ~20% local-density windows count as "dense" for reading purposes.
+    density_threshold = sorted(local_counts)[int(0.8 * n)] if n else 0
+
+    def _pctile(vals: list[float], p: float) -> float:
+        if not vals:
+            return 0.0
+        s = sorted(vals)
+        idx = min(len(s) - 1, int(p * len(s)))
+        return s[idx]
+
+    dense_velocities = [v for v, d in zip(velocities, local_counts) if d >= density_threshold]
+
+    return ReadingProfile(
+        velocity_p95=_pctile(velocities, 0.95),
+        velocity_dense_p95=_pctile(dense_velocities, 0.95) if dense_velocities else 0.0,
+        high_scroll_share=sum(1 for v in velocities if v > 350) / n,
+        peak_velocity=max(dense_velocities) if dense_velocities else max(velocities),
+    )
+
+
 # --- aggregate --------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -787,6 +855,7 @@ class MapFeatures:
     transitions: TransitionProfile
     trajectory: TrajectoryProfile
     gimmick: GimmickProfile
+    reading: ReadingProfile
     segments: SegmentProfile
     strain: StrainProfile
     parity: ParityProfile
@@ -809,6 +878,7 @@ class MapFeatures:
             "transitions": asdict(self.transitions),
             "trajectory": asdict(self.trajectory),
             "gimmick": asdict(self.gimmick),
+            "reading": asdict(self.reading),
             "segments": asdict(self.segments),
             "strain": asdict(self.strain),
             "streams": asdict(self.streams),
@@ -830,6 +900,7 @@ def extract_features(beatmap: TaikoBeatmap) -> MapFeatures:
     transitions = transition_profile(hittable, density.duration_s)
     trajectory = trajectory_profile(hittable)
     gimmick = gimmick_profile(hittable, density.avg_nps, movement)
+    reading = reading_profile(hittable)
     segments = segment_profile(hittable, n_segments=10)
     strain = strain_profile(hittable)
     parity = compute_parity(hittable)
@@ -851,6 +922,7 @@ def extract_features(beatmap: TaikoBeatmap) -> MapFeatures:
         transitions=transitions,
         trajectory=trajectory,
         gimmick=gimmick,
+        reading=reading,
         segments=segments,
         strain=strain,
         parity=parity,

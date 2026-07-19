@@ -70,6 +70,7 @@ class DimensionRating:
     gimmick: float
     technical: float
     consistency: float
+    reading: float = 0.0    # base scroll velocity / reaction-time load
 
     def as_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -253,6 +254,26 @@ def _raw_consistency(f: MapFeatures) -> float:
     return base + flat_reward - tech_penalty - hard_div_penalty - stream_penalty
 
 
+def _raw_reading(f: MapFeatures) -> float:
+    """Reading = fast base scroll velocity where notes are dense.
+
+    Distinct from gimmick (which is *chaotic* SV changes). A perfectly
+    consistent SV=2.5 map at high BPM is 0 gimmick but heavy reading —
+    the scroll just rushes at you and reaction time is the bottleneck.
+
+    Anchors: 220 = comfortable moderate scroll (mid-tier Oni), 550 =
+    challenging (high-SV Inner Oni or high-BPM standard-SV), 700+ is
+    where reading dominates every other skill.
+    """
+    dense_p95_n = _norm_up(f.reading.velocity_dense_p95, 220, 550)
+    peak_n      = _norm_up(f.reading.peak_velocity, 300, 700)
+    share_n     = _norm(f.reading.high_scroll_share, 0.15, 0.75)
+    # Weighted: dense-p95 is the main signal (what does dense play LOOK like),
+    # peak is a smaller kicker (one hard section), share captures duration
+    # (does the reading load persist or is it a single spike?).
+    return 55 * dense_p95_n + 25 * peak_n + 20 * share_n
+
+
 def _od_pressure(od: float, hit_window_mult: float = 1.0) -> float:
     """How much tighter accuracy is vs the OD 5 baseline (great window = 35 ms).
 
@@ -302,4 +323,5 @@ def rate_map(
         gimmick=_shape(_raw_gimmick(features)) * bonus,
         technical=_shape(_raw_technical(features)) * bonus * tech_mult,
         consistency=_shape(_raw_consistency(features)) * bonus * cons_mult,
+        reading=_shape(_raw_reading(features)) * bonus,
     )

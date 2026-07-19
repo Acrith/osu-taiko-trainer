@@ -70,6 +70,10 @@ class ModEffects:
     label: str              # "NM", "DT", "HDDT", "HRDT", ...
     speed_mult: float       # 1.0 nm, 1.5 dt/nc, 0.75 ht
     hit_window_mult: float  # 1.0 nm, 1/1.5 dt, 1/1.4 hr, product for combos
+    scroll_mult: float      # 1.0 nm, 1.4 hr — visual scroll speed multiplier for
+                            # the READING dimension. DT stays 1.0 here because
+                            # its 1.5× BPM already amplifies scroll velocity through
+                            # the `bpm × sv` product in ReadingProfile.
     has_hd: bool            # reading challenge marker (no timing effect)
     has_hr: bool
     has_dt: bool            # true for both DT and NC
@@ -83,9 +87,13 @@ class ModEffects:
     def alters_map(self) -> bool:
         """True if the effective difficulty vector differs from the base map's
         rating. Fires when the play changes what feature extraction sees
-        (speed_mult) OR what accuracy pressure the rating reflects
-        (hit_window_mult — DT, HR, EZ, HT, and their combos)."""
-        return self.speed_mult != 1.0 or self.hit_window_mult != 1.0
+        (speed_mult, scroll_mult) OR what accuracy pressure the rating
+        reflects (hit_window_mult — DT, HR, EZ, HT, and their combos)."""
+        return (
+            self.speed_mult != 1.0
+            or self.hit_window_mult != 1.0
+            or self.scroll_mult != 1.0
+        )
 
 
 def parse_mods(bitfield: int) -> ModEffects:
@@ -107,6 +115,11 @@ def parse_mods(bitfield: int) -> ModEffects:
     if has_ez: hit_window_mult *= 1.5
     if has_ht: hit_window_mult *= 1.0 / 0.75  # widen — same wall-clock windows but slower notes
 
+    # Visual scroll speed. HR bumps SV visually by ~1.4× in stable osu!taiko
+    # (confirmed in-game). DT/HT already amplify scroll through the BPM term
+    # of scroll velocity (bpm × sv), so we don't double-count them here.
+    scroll_mult = 1.4 if has_hr else 1.0
+
     # Label: concatenate active mods in canonical order.
     parts: list[str] = []
     for flag, tag in _LABEL_ORDER:
@@ -122,6 +135,7 @@ def parse_mods(bitfield: int) -> ModEffects:
         label=label,
         speed_mult=speed_mult,
         hit_window_mult=hit_window_mult,
+        scroll_mult=scroll_mult,
         has_hd=has_hd,
         has_hr=has_hr,
         has_dt=has_dt,
@@ -130,27 +144,29 @@ def parse_mods(bitfield: int) -> ModEffects:
 
 
 def apply_mods_to_beatmap(bm: TaikoBeatmap, mods: ModEffects) -> TaikoBeatmap:
-    """Return a scaled copy of `bm` with hit-object BPMs multiplied by
-    `mods.speed_mult` and time_ms divided by it — so downstream feature
-    extraction sees the map as the player actually experiences it.
+    """Return a scaled copy of `bm` with:
+    - hit-object BPMs × speed_mult, time_ms / speed_mult (DT/HT effects)
+    - hit-object sv_multiplier × scroll_mult (HR visual scroll bump)
 
-    NM (or any mods that don't alter timing) returns the original beatmap
-    unchanged — no wasted copies for the common case.
+    Downstream feature extraction then sees the map as the player actually
+    experiences it — DT amplifies scroll velocity through bpm×sv, HR
+    amplifies it directly through sv.
 
-    OD is left as the source value in `bm.difficulty`. Judgment scales the
-    hit windows via `mods.hit_window_mult` instead of touching OD directly,
-    which keeps the source-of-truth OD intact for display and avoids
-    double-counting DT+HR."""
-    if mods.speed_mult == 1.0:
+    NM returns the original beatmap unchanged — no wasted copies for the
+    common case. OD is left in `bm.difficulty` and judgment scales windows
+    via `mods.hit_window_mult` (keeps source-of-truth OD intact, and
+    avoids double-counting DT+HR)."""
+    if mods.speed_mult == 1.0 and mods.scroll_mult == 1.0:
         return bm
 
-    inv = 1.0 / mods.speed_mult
+    inv_speed = 1.0 / mods.speed_mult
     scaled_hits: list[HitObject] = []
     for h in bm.hit_objects:
         scaled_hits.append(replace(
             h,
-            time_ms=int(round(h.time_ms * inv)),
-            end_time_ms=int(round(h.end_time_ms * inv)),
+            time_ms=int(round(h.time_ms * inv_speed)),
+            end_time_ms=int(round(h.end_time_ms * inv_speed)),
             bpm=h.bpm * mods.speed_mult,
+            sv_multiplier=h.sv_multiplier * mods.scroll_mult,
         ))
     return replace(bm, hit_objects=tuple(scaled_hits))

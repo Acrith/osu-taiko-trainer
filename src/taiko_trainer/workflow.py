@@ -310,11 +310,11 @@ def add_replay(
     # this is a no-op — `apply_mods_to_beatmap` returns `bm` unchanged.
     mods = parse_mods(rp.meta.mods)
     play_bm = apply_mods_to_beatmap(bm, mods)
-    # For mods that change what feature extraction sees (DT scales BPM/time),
-    # re-extract. For window-only mods (HR alone) the features are identical
-    # to base — reuse them. Rating gets `hit_window_mult` either way so
-    # accuracy-pressure boost applies to consistency + technical.
-    play_features = extract_features(play_bm) if mods.speed_mult != 1.0 else features
+    # For mods that change what feature extraction sees (speed_mult from DT/HT
+    # or scroll_mult from HR), re-extract. Rating gets hit_window_mult either
+    # way so accuracy-pressure boost applies to consistency + technical.
+    needs_reextract = mods.speed_mult != 1.0 or mods.scroll_mult != 1.0
+    play_features = extract_features(play_bm) if needs_reextract else features
     play_rating = (
         rate_map(play_features, od=bm.difficulty.overall_difficulty, hit_window_mult=mods.hit_window_mult)
         if mods.alters_map
@@ -352,7 +352,8 @@ def add_replay(
                COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
                COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
                COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
-               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency
+               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency,
+               COALESCE(r.rating_reading_eff,     m.rating_reading, 0)  AS rating_reading
         FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
         """
     ).fetchall()
@@ -363,6 +364,7 @@ def add_replay(
                 speed=r["rating_speed"], stamina=r["rating_stamina"],
                 gimmick=r["rating_gimmick"], technical=r["rating_technical"],
                 consistency=r["rating_consistency"],
+                reading=r["rating_reading"],
             ),
             accuracy=r["accuracy_judged"], misses=r["count_miss"],
         )
