@@ -30,6 +30,7 @@ from . import auth as auth_module
 from . import db as db_module
 from .db import (
     create_api_token,
+    delete_user_completely,
     discover_players,
     ensure_player_db_for_user,
     find_player_name_for_user,
@@ -45,6 +46,7 @@ from .db import (
     open_catalog,
     open_plays,
     revoke_api_token,
+    set_user_profile_public,
     upsert_player,
     upsert_user_from_osu,
     verify_api_token,
@@ -313,6 +315,66 @@ def create_app(workspace: str) -> FastAPI:
             return RedirectResponse(url="/login", status_code=302)
         cat = open_catalog(workspace)
         revoke_api_token(cat, uid, token_id)
+        cat.close()
+        return RedirectResponse(url="/settings/tokens", status_code=303)
+
+    @app.post("/settings/delete-account")
+    def delete_account(
+        confirm: str = Form(...),
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """Irreversible account delete. Requires the user to type their
+        osu_username into a confirm field to prevent accidental clicks
+        (and to force reading the "everything is gone" hint next to it).
+        Wipes users row, revokes all tokens, deletes per-player DB.
+        Clears session cookie + redirects home."""
+        if not auth_module.is_web_mode():
+            raise HTTPException(status_code=404)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        cat = open_catalog(workspace)
+        user = get_user_by_id(cat, uid)
+        cat.close()
+        if not user:
+            return RedirectResponse(url="/", status_code=302)
+        if confirm.strip().lower() != (user["osu_username"] or "").strip().lower():
+            return HTMLResponse(
+                _render_error(
+                    f"Account NOT deleted — confirmation text didn't match your username. "
+                    f'<a href="/settings/tokens">Back to settings</a>.'
+                ),
+                status_code=400,
+            )
+        summary = delete_user_completely(workspace, uid)
+        resp = RedirectResponse(url="/?ok=account-deleted", status_code=303)
+        resp.delete_cookie(key=auth_module.SESSION_COOKIE_NAME, path="/")
+        # Log summary to server console — useful for debugging accidental
+        # deletions if the operator wants to audit.
+        print(
+            f"[delete-account] user_id={uid} deleted: "
+            f"user_deleted={summary['user_deleted']} "
+            f"tokens_revoked={summary['tokens_revoked']} "
+            f"player_db={summary['player_db_deleted']} "
+            f"replays_lost={summary['replays_lost']}",
+            flush=True,
+        )
+        return resp
+
+    @app.post("/settings/profile-visibility")
+    def set_profile_visibility(
+        public: str = Form(...),
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """Flip profile_public between 0/1. Form-driven for a simple
+        HTML toggle; POST-then-303 so back button behavior is sane."""
+        if not auth_module.is_web_mode():
+            raise HTTPException(status_code=404)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        cat = open_catalog(workspace)
+        set_user_profile_public(cat, uid, public.lower() == "true")
         cat.close()
         return RedirectResponse(url="/settings/tokens", status_code=303)
 
@@ -837,6 +899,11 @@ def create_app(workspace: str) -> FastAPI:
 
     @app.post("/settings/osu-user/unlink")
     async def unlink_osu_user(player: str = Form(...)):
+        # In WEB mode, identity is fixed at OAuth login — unlinking makes
+        # no sense (you'd break your own report while staying authenticated).
+        # Reject the endpoint entirely rather than surprise a curl user.
+        if auth_module.is_web_mode():
+            raise HTTPException(status_code=404, detail="unlink is not available in web mode")
         conn = open_plays(workspace, player)
         db_module.set_osu_profile(conn, player, user_id=None, username=None,
                                   avatar_url=None, country_code=None, global_rank=None)
@@ -1442,7 +1509,13 @@ def _render_player_flash(flash_ok: str, flash_err: str) -> str:
 
 def _render_osu_link_section(player: str, report) -> str:
     """Settings-style card at the bottom of the player page for linking an
-    osu! profile. Shows the linked profile (with avatar) OR a form to link."""
+    osu! profile. Shows the linked profile (with avatar) OR a form to link.
+
+    In WEB mode this whole section is redundant — the player IS an osu!
+    user (identity is fixed at OAuth login) and profile info is already
+    visible in the hero card. Returning empty hides the section entirely."""
+    if auth_module.is_web_mode():
+        return ""
     if getattr(report, "osu_username", None):
         avatar = report.osu_avatar_url or ""
         return f"""
@@ -1494,7 +1567,11 @@ def _render_osu_subtitle(report) -> str:
 
 def _render_osu_profile_link(player: str, report) -> str:
     """Renders 'Link osu! profile' button (opens a details+form) or 'Unlink'
-    button when already linked."""
+    button when already linked. In WEB mode neither button is shown —
+    identity is fixed to the OAuth login, "unlink" makes no sense (you
+    ARE your osu! account), and "link" is redundant."""
+    if auth_module.is_web_mode():
+        return ""
     if getattr(report, "osu_username", None):
         return (
             f'<form method="post" action="/settings/osu-user/unlink" style="display: inline;">'
@@ -3236,10 +3313,32 @@ def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
                 f'</tr>'
             )
 
+    current_public = bool(user.get("profile_public", 1))
+    profile_toggle_html = f"""
+  <section class="card">
+    <h2>Profile visibility</h2>
+    <p class="hint">
+      When public, anyone can see your training report at <code>/u/{user['osu_username']}</code>
+      including maps, mods, hit distribution, and skill vector. When private, only you can see it
+      (via <code>/me</code>). Toggling doesn't delete data — just hides it from strangers.
+    </p>
+    <form method="post" action="/settings/profile-visibility" class="visibility-form">
+      <div class="visibility-current">
+        Currently: <strong class="{'is-public' if current_public else 'is-private'}">{'PUBLIC' if current_public else 'PRIVATE'}</strong>
+      </div>
+      <button type="submit" name="public" value="{'false' if current_public else 'true'}" class="visibility-btn">
+        {'Make private' if current_public else 'Make public'}
+      </button>
+    </form>
+  </section>
+"""
+
     body = f"""
   <section class="eyebrow-row">
-    <span class="eyebrow"><a href="/u/{user['osu_username']}" style="color: var(--ink-muted);">← {user['osu_username']}</a>  ·  settings  ·  api tokens</span>
+    <span class="eyebrow"><a href="/u/{user['osu_username']}" style="color: var(--ink-muted);">← {user['osu_username']}</a>  ·  settings</span>
   </section>
+
+  {profile_toggle_html}
 
   <section class="card">
     <h2>API tokens</h2>
@@ -3265,6 +3364,27 @@ def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
     </div>
   </section>
 
+  <section class="card danger-card">
+    <h2>Delete account</h2>
+    <p class="hint">
+      Permanent + irreversible. Removes your <code>users</code> row, revokes every API
+      token, and deletes your per-player database including all replay data, snapshots,
+      and skill history. Your osu! account itself is not affected — you can log back
+      in later to start fresh from scratch.
+    </p>
+    <details class="danger-details">
+      <summary>Show delete controls</summary>
+      <form method="post" action="/settings/delete-account" class="danger-form"
+            onsubmit="return confirm('Really delete your account and everything on the server? This cannot be undone.');">
+        <label>
+          Type your osu! username (<code>{user['osu_username']}</code>) to confirm:
+          <input type="text" name="confirm" required autocomplete="off" placeholder="{user['osu_username']}">
+        </label>
+        <button type="submit" class="danger-btn">Delete account permanently</button>
+      </form>
+    </details>
+  </section>
+
   <style>
     .new-token-banner {{ background: var(--accent-faint); border: 1px solid var(--accent-soft); border-radius: 4px; padding: 16px; margin: 12px 0; }}
     .new-token-label {{ font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); margin-bottom: 8px; }}
@@ -3280,9 +3400,24 @@ def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
     .revoked-row {{ opacity: 0.5; }}
     .pill.revoked {{ font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; padding: 2px 8px; background: var(--rule); color: var(--ink-muted); border-radius: 3px; }}
     .token-prefix {{ font-family: var(--font-mono); font-size: 12px; color: var(--ink); }}
+    .visibility-form {{ display: flex; align-items: center; gap: 20px; margin-top: 14px; }}
+    .visibility-current {{ font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; color: var(--ink-muted); }}
+    .visibility-current strong.is-public {{ color: var(--great); letter-spacing: 0.14em; }}
+    .visibility-current strong.is-private {{ color: var(--miss); letter-spacing: 0.14em; }}
+    .visibility-btn {{ padding: 8px 20px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); border-radius: 3px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; }}
+    .visibility-btn:hover {{ border-color: var(--accent); color: var(--accent); }}
+    .danger-card {{ border-color: var(--miss); }}
+    .danger-details {{ margin-top: 12px; }}
+    .danger-details summary {{ cursor: pointer; color: var(--ink-muted); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; }}
+    .danger-details summary:hover {{ color: var(--miss); }}
+    .danger-form {{ display: flex; flex-direction: column; gap: 12px; margin-top: 14px; padding: 14px; background: var(--panel); border: 1px dashed var(--miss); border-radius: 4px; }}
+    .danger-form label {{ display: flex; flex-direction: column; gap: 6px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }}
+    .danger-form input {{ padding: 8px 12px; border: 1px solid var(--rule); background: var(--bg); color: var(--ink); border-radius: 3px; font-family: var(--font-mono); font-size: 14px; }}
+    .danger-btn {{ align-self: flex-start; padding: 8px 20px; border: 1px solid var(--miss); background: transparent; color: var(--miss); border-radius: 3px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; }}
+    .danger-btn:hover {{ background: var(--miss); color: white; }}
   </style>
 """
-    return _html_page(f"tokens — {user['osu_username']}", body)
+    return _html_page(f"settings — {user['osu_username']}", body)
 
 
 def _render_error(message: str) -> str:

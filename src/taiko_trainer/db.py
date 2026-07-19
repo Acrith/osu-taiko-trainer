@@ -565,6 +565,80 @@ def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, A
     return dict(row) if row else None
 
 
+def set_user_profile_public(
+    conn: sqlite3.Connection, user_id: int, public: bool
+) -> None:
+    """Toggle the user's profile_public flag. When False, /u/{osu_username}
+    404s for anyone except the owner. Owner self-view always works."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    conn.execute(
+        f"UPDATE {schema}.users SET profile_public = ? WHERE id = ?",
+        (1 if public else 0, int(user_id)),
+    )
+    conn.commit()
+
+
+def delete_user_completely(
+    workspace: str | Path, user_id: int
+) -> dict[str, Any]:
+    """Irreversible account delete. Wipes:
+    - users row (removes login identity)
+    - api_tokens rows (revokes anything they'd shipped to a machine)
+    - the linked per-player .db file (all their replay data)
+
+    Returns a summary of what got removed so the caller can log or
+    confirm to the user. If the user isn't found, returns zeros.
+
+    Deliberately opens fresh connections rather than taking one from the
+    caller — the multi-file delete has to be atomic-ish, and doing it
+    inline with an existing catalog connection risks leaving orphaned
+    state on partial failure."""
+    ws = Path(workspace)
+    summary: dict[str, Any] = {
+        "user_deleted": False,
+        "tokens_revoked": 0,
+        "player_db_deleted": None,
+        "replays_lost": 0,
+    }
+
+    # Find + delete the per-player DB first — while we still have the
+    # linkage. If this fails we haven't touched the catalog yet.
+    player_name = find_player_name_for_user(ws, int(user_id))
+    if player_name:
+        p = player_db_path(ws, player_name)
+        # Best-effort record what we're wiping for the summary.
+        if p.exists():
+            try:
+                probe = sqlite3.connect(str(p))
+                summary["replays_lost"] = int(
+                    probe.execute("SELECT COUNT(*) FROM replays").fetchone()[0]
+                )
+                probe.close()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                p.unlink()
+                summary["player_db_deleted"] = player_name
+            except OSError:
+                pass
+
+    # Now catalog cleanup: revoke all tokens + delete users row.
+    cat = open_catalog(ws)
+    tok_cur = cat.execute(
+        "DELETE FROM users WHERE id = ?", (int(user_id),)
+    )
+    if (tok_cur.rowcount or 0) > 0:
+        summary["user_deleted"] = True
+    # Cascade tokens by hand — no FK enforcement in SQLite by default.
+    tk_cur = cat.execute(
+        "DELETE FROM api_tokens WHERE user_id = ?", (int(user_id),)
+    )
+    summary["tokens_revoked"] = int(tk_cur.rowcount or 0)
+    cat.commit()
+    cat.close()
+    return summary
+
+
 # -----------------------------------------------------------------------------
 # API tokens (uploader companion, Task #67)
 # -----------------------------------------------------------------------------
