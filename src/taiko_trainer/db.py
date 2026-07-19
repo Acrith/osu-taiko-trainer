@@ -110,7 +110,11 @@ CREATE TABLE IF NOT EXISTS player_info (
     osu_avatar_url      TEXT,
     osu_cover_url       TEXT,
     osu_country_code    TEXT,
-    osu_global_rank     INTEGER
+    osu_global_rank     INTEGER,
+    -- Links this per-player DB to a catalog.users row. NULL in local mode
+    -- (no auth); populated in web mode after osu! OAuth login. Enables
+    -- lookups like "find the DB for the currently logged-in user".
+    user_id             INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS replays (
@@ -256,6 +260,9 @@ def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
         ("osu_cover_url",    "ALTER TABLE player_info ADD COLUMN osu_cover_url TEXT"),
         ("osu_country_code", "ALTER TABLE player_info ADD COLUMN osu_country_code TEXT"),
         ("osu_global_rank",  "ALTER TABLE player_info ADD COLUMN osu_global_rank INTEGER"),
+        # Web-mode multi-tenancy: links this per-player DB to catalog.users.
+        # NULL in local mode; populated on first login in web mode. Task #64.
+        ("user_id",          "ALTER TABLE player_info ADD COLUMN user_id INTEGER"),
     ):
         if col not in existing:
             conn.execute(ddl)
@@ -533,6 +540,124 @@ def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, A
         (username,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def link_player_to_user(conn: sqlite3.Connection, player_name: str, user_id: int) -> None:
+    """Set the user_id on a per-player DB's player_info row. Called when a
+    user logs in via OAuth and we resolve which per-player DB is theirs."""
+    conn.execute(
+        "UPDATE player_info SET user_id = ?, updated_at = ? WHERE name = ?",
+        (int(user_id), _now(), player_name),
+    )
+    conn.commit()
+
+
+def find_player_name_for_user(
+    workspace: str | Path, user_id: int
+) -> str | None:
+    """Given a user_id (from catalog.users), find which per-player DB in the
+    workspace belongs to them. Returns the player name (filename stem) or
+    None if not linked yet. Scans each *.db's player_info.user_id."""
+    ws = Path(workspace)
+    if not ws.exists():
+        return None
+    for p in sorted(ws.glob("*.db")):
+        if p.name == CATALOG_FILENAME:
+            continue
+        try:
+            conn = sqlite3.connect(str(p))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT name FROM player_info WHERE user_id = ? LIMIT 1", (int(user_id),)
+            ).fetchone()
+            conn.close()
+            if row:
+                return str(row["name"])
+        except sqlite3.OperationalError:
+            # Old DB that hasn't been migrated yet — user_id column missing.
+            # Safe to skip; a subsequent open_plays() call will migrate it.
+            continue
+    return None
+
+
+def ensure_player_db_for_user(
+    workspace: str | Path,
+    user: dict[str, Any],
+) -> str:
+    """Web-mode helper: ensure a per-player DB exists for this user and is
+    linked back to their users row. Returns the player name (which is the
+    filename stem and the URL segment for /u/{name}).
+
+    Idempotent — calling twice for the same user is safe. On second call,
+    finds the existing DB and just refreshes the osu! profile fields.
+
+    Naming convention: `<osu_username>.db`, so /u/{osu_username} lookups
+    are direct file-system lookups. If the user changes their osu!
+    username later, we do NOT rename the file — the old name stays as the
+    stable identifier for their history; the profile display fields track
+    the current name."""
+    existing = find_player_name_for_user(workspace, int(user["id"]))
+    if existing is not None:
+        # Refresh osu! display fields on the linked player_info row so
+        # avatar / cover / rank stay current.
+        conn = open_plays(workspace, existing)
+        conn.execute(
+            """
+            UPDATE player_info SET
+                osu_user_id      = ?,
+                osu_username     = ?,
+                osu_avatar_url   = ?,
+                osu_cover_url    = ?,
+                osu_country_code = ?,
+                osu_global_rank  = ?,
+                updated_at       = ?
+            WHERE name = ?
+            """,
+            (
+                user["osu_user_id"], user["osu_username"],
+                user["osu_avatar_url"], user["osu_cover_url"],
+                user["osu_country_code"], user["osu_global_rank"],
+                _now(), existing,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return existing
+
+    # Create a new per-player DB, keyed on the osu_username. If that filename
+    # is already taken by another user (extremely unlikely but possible from
+    # local-mode collisions), suffix with the users.id.
+    name = user["osu_username"]
+    p = player_db_path(workspace, name)
+    if p.exists():
+        name = f"{name}-{user['id']}"
+
+    conn = open_plays(workspace, name)  # creates the file + player_info row
+    conn.execute(
+        """
+        UPDATE player_info SET
+            style            = COALESCE(style, ?),
+            user_id          = ?,
+            osu_user_id      = ?,
+            osu_username     = ?,
+            osu_avatar_url   = ?,
+            osu_cover_url    = ?,
+            osu_country_code = ?,
+            osu_global_rank  = ?,
+            updated_at       = ?
+        WHERE name = ?
+        """,
+        (
+            "unknown", int(user["id"]),
+            user["osu_user_id"], user["osu_username"],
+            user["osu_avatar_url"], user["osu_cover_url"],
+            user["osu_country_code"], user["osu_global_rank"],
+            _now(), name,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return name
 
 
 def add_map_root(conn: sqlite3.Connection, path: str) -> None:

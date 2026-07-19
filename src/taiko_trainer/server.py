@@ -30,6 +30,8 @@ from . import auth as auth_module
 from . import db as db_module
 from .db import (
     discover_players,
+    ensure_player_db_for_user,
+    find_player_name_for_user,
     get_all_maps,
     get_map,
     get_map_content,
@@ -176,7 +178,14 @@ def create_app(workspace: str) -> FastAPI:
             osu_country_code=me.country_code,
             osu_global_rank=me.global_rank_taiko,
         )
+        user = get_user_by_id(cat, user_id)
         cat.close()
+
+        # First login for a new user creates their per-player DB and links
+        # it back to the users row. Subsequent logins refresh display
+        # fields but don't touch replay data.
+        if user:
+            ensure_player_db_for_user(workspace, user)
 
         cookie = auth_module.make_session_cookie(user_id)
         resp = RedirectResponse(url="/me", status_code=302)
