@@ -74,6 +74,11 @@ class ModEffects:
                             # the READING dimension. DT stays 1.0 here because
                             # its 1.5× BPM already amplifies scroll velocity through
                             # the `bpm × sv` product in ReadingProfile.
+    reading_mult: float     # 1.0 nm, 1.25 hd — multiplier on the reading dim only.
+                            # HD makes notes fade before the hit point, so you have
+                            # less visual runway to process each note. Doesn't
+                            # change timing, BPM, or SV — the map plays the same,
+                            # you just SEE it worse.
     has_hd: bool            # reading challenge marker (no timing effect)
     has_hr: bool
     has_dt: bool            # true for both DT and NC
@@ -87,12 +92,14 @@ class ModEffects:
     def alters_map(self) -> bool:
         """True if the effective difficulty vector differs from the base map's
         rating. Fires when the play changes what feature extraction sees
-        (speed_mult, scroll_mult) OR what accuracy pressure the rating
-        reflects (hit_window_mult — DT, HR, EZ, HT, and their combos)."""
+        (speed_mult, scroll_mult), what accuracy pressure the rating reflects
+        (hit_window_mult — DT, HR, EZ, HT), OR the reading dim (reading_mult
+        — HD)."""
         return (
             self.speed_mult != 1.0
             or self.hit_window_mult != 1.0
             or self.scroll_mult != 1.0
+            or self.reading_mult != 1.0
         )
 
 
@@ -120,6 +127,15 @@ def parse_mods(bitfield: int) -> ModEffects:
     # of scroll velocity (bpm × sv), so we don't double-count them here.
     scroll_mult = 1.4 if has_hr else 1.0
 
+    # HD reading multiplier — notes fade before hit, less visual runway per
+    # note. 1.25 = "reading is 25% harder" on top of whatever scroll pressure
+    # already exists. Applied multiplicatively on the reading dim in
+    # rate_map, so a fast-scroll map with HD stacks on top of the base
+    # reading load, and a slow map with HD is only mildly affected in
+    # absolute terms (matches actual play: HD on Kantan is trivial, HD on
+    # 220+ BPM Inner Oni is brutal).
+    reading_mult = 1.25 if has_hd else 1.0
+
     # Label: concatenate active mods in canonical order.
     parts: list[str] = []
     for flag, tag in _LABEL_ORDER:
@@ -136,6 +152,7 @@ def parse_mods(bitfield: int) -> ModEffects:
         speed_mult=speed_mult,
         hit_window_mult=hit_window_mult,
         scroll_mult=scroll_mult,
+        reading_mult=reading_mult,
         has_hd=has_hd,
         has_hr=has_hr,
         has_dt=has_dt,

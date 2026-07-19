@@ -316,7 +316,12 @@ def add_replay(
     needs_reextract = mods.speed_mult != 1.0 or mods.scroll_mult != 1.0
     play_features = extract_features(play_bm) if needs_reextract else features
     play_rating = (
-        rate_map(play_features, od=bm.difficulty.overall_difficulty, hit_window_mult=mods.hit_window_mult)
+        rate_map(
+            play_features,
+            od=bm.difficulty.overall_difficulty,
+            hit_window_mult=mods.hit_window_mult,
+            reading_mult=mods.reading_mult,
+        )
         if mods.alters_map
         else rating
     )

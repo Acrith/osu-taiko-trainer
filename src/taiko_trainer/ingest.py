@@ -159,7 +159,12 @@ def refresh_ratings(workspace: str) -> None:
                 play_bm = apply_mods_to_beatmap(bm, mods)
                 feats = extract_features(play_bm)
                 eff_rating = (
-                    rate_map(feats, od=bm.difficulty.overall_difficulty, hit_window_mult=mods.hit_window_mult)
+                    rate_map(
+                        feats,
+                        od=bm.difficulty.overall_difficulty,
+                        hit_window_mult=mods.hit_window_mult,
+                        reading_mult=mods.reading_mult,
+                    )
                     if mods.alters_map else None
                 )
                 judged = judge_replay(play_bm, rp, hit_window_mult=mods.hit_window_mult)

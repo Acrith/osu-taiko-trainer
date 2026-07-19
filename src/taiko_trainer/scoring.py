@@ -329,15 +329,17 @@ def rate_map(
     *,
     od: float = 5.0,
     hit_window_mult: float = 1.0,
+    reading_mult: float = 1.0,
 ) -> DimensionRating:
-    """Rate the map on the five dimensions.
+    """Rate the map on the six dimensions.
 
-    `od` is the map's OverallDifficulty (from `.osu`). `hit_window_mult` is
-    the accuracy-tightening from mods (see `mods.parse_mods`). Callers that
-    already handled mods by scaling the beatmap (BPM/time) still need to
-    pass `hit_window_mult` here so accuracy pressure enters the rating
-    correctly — HR alone doesn't change BPM but does tighten windows, so
-    it lands on this path alone."""
+    `od` is the map's OverallDifficulty (from `.osu`). `hit_window_mult`
+    is the accuracy-tightening from mods (see `mods.parse_mods`) — HR
+    alone doesn't change BPM but does tighten windows, so it lands here.
+    `reading_mult` is the HD reading multiplier (1.25 when HD is on) —
+    HD doesn't change what feature extraction sees, it just makes what's
+    there harder to visually process, so we apply it as a straight
+    multiplier on the reading dim after the structural signal is computed."""
     bonus = _length_bonus(features.hittable_notes)
     pressure = _od_pressure(od, hit_window_mult)
     cons_mult = 1.0 + _OD_BOOST_K_CONSISTENCY * (pressure - 1.0)
@@ -348,5 +350,5 @@ def rate_map(
         gimmick=_shape(_raw_gimmick(features)) * bonus,
         technical=_shape(_raw_technical(features)) * bonus * tech_mult,
         consistency=_shape(_raw_consistency(features)) * bonus * cons_mult,
-        reading=_shape(_raw_reading(features)) * bonus,
+        reading=_shape(_raw_reading(features)) * bonus * reading_mult,
     )
