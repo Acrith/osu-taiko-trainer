@@ -65,11 +65,31 @@ _LABEL_ORDER = [
 
 @dataclass(frozen=True)
 class ModEffects:
-    """Everything downstream cares about, extracted from a raw bitfield."""
+    """Everything downstream cares about, extracted from a raw bitfield.
+
+    Two distinct axes affect the hit windows:
+
+    - od_mult          scales the OD NUMBER before window lookup. HR = 1.4,
+                       EZ = 0.5, others = 1.0. This is how osu!taiko really
+                       models HR — not "windows × 1/1.4", but "OD × 1.4 then
+                       recompute windows". The distinction matters because
+                       the OD→window function is piecewise linear (different
+                       slope 0-5 vs 5-10), so the two approaches give
+                       measurably different windows at the same OD (~2ms at
+                       OD 6, enough to convert 300s into 100s).
+    - hit_window_mult  scales the final wall-clock window after OD lookup.
+                       DT = 1/1.5, HT = 1/0.75. Used for wall-clock speed
+                       scaling only; HR/EZ do NOT belong here.
+
+    Combined effective window in ms:
+        effective_od = min(od * od_mult, 10.0)
+        window       = od_lerp(effective_od, ...) * hit_window_mult
+    """
     bitfield: int
     label: str              # "NM", "DT", "HDDT", "HRDT", ...
     speed_mult: float       # 1.0 nm, 1.5 dt/nc, 0.75 ht
-    hit_window_mult: float  # 1.0 nm, 1/1.5 dt, 1/1.4 hr, product for combos
+    od_mult: float          # 1.0 nm, 1.4 hr, 0.5 ez — multiplier on OD NUMBER
+    hit_window_mult: float  # 1.0 nm, 1/1.5 dt, 1/0.75 ht — wall-clock only
     scroll_mult: float      # 1.0 nm, 1.4 hr — visual scroll speed multiplier for
                             # the READING dimension. DT stays 1.0 here because
                             # its 1.5× BPM already amplifies scroll velocity through
@@ -93,10 +113,10 @@ class ModEffects:
         """True if the effective difficulty vector differs from the base map's
         rating. Fires when the play changes what feature extraction sees
         (speed_mult, scroll_mult), what accuracy pressure the rating reflects
-        (hit_window_mult — DT, HR, EZ, HT), OR the reading dim (reading_mult
-        — HD)."""
+        (od_mult, hit_window_mult), OR the reading dim (reading_mult — HD)."""
         return (
             self.speed_mult != 1.0
+            or self.od_mult != 1.0
             or self.hit_window_mult != 1.0
             or self.scroll_mult != 1.0
             or self.reading_mult != 1.0
@@ -114,13 +134,19 @@ def parse_mods(bitfield: int) -> ModEffects:
 
     # DT and HT are mutually exclusive in game; DT wins if both set (defensive).
     speed_mult = 1.5 if has_dt else (0.75 if has_ht else 1.0)
-    # Hit-window multiplier: DT tightens by 1/1.5, HR by 1/1.4, EZ widens by
-    # 1.5. These compose multiplicatively.
+
+    # OD multiplier — HR bumps the OD NUMBER by 1.4, EZ halves it. Windows are
+    # then recomputed at the new OD, matching osu!taiko's actual HR behavior.
+    # (HR and EZ are mutually exclusive in game; HR wins if both set.)
+    od_mult = 1.4 if has_hr else (0.5 if has_ez else 1.0)
+
+    # Wall-clock hit window multiplier — DT tightens by 1/1.5 (notes come
+    # 1.5× faster, so the same OD-derived window is a smaller fraction of
+    # a beat). HT widens by the inverse. HR/EZ do NOT belong here; they're
+    # captured via od_mult above.
     hit_window_mult = 1.0
     if has_dt: hit_window_mult *= 1.0 / 1.5
-    if has_hr: hit_window_mult *= 1.0 / 1.4
-    if has_ez: hit_window_mult *= 1.5
-    if has_ht: hit_window_mult *= 1.0 / 0.75  # widen — same wall-clock windows but slower notes
+    if has_ht: hit_window_mult *= 1.0 / 0.75
 
     # Visual scroll speed. HR bumps SV visually by ~1.4× in stable osu!taiko
     # (confirmed in-game). DT/HT already amplify scroll through the BPM term
@@ -150,6 +176,7 @@ def parse_mods(bitfield: int) -> ModEffects:
         bitfield=bf,
         label=label,
         speed_mult=speed_mult,
+        od_mult=od_mult,
         hit_window_mult=hit_window_mult,
         scroll_mult=scroll_mult,
         reading_mult=reading_mult,

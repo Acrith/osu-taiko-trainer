@@ -60,21 +60,35 @@ class JudgmentWindows:
     miss: float
 
     @classmethod
-    def from_od(cls, od: float, hit_window_mult: float = 1.0) -> "JudgmentWindows":
+    def from_od(
+        cls,
+        od: float,
+        od_mult: float = 1.0,
+        hit_window_mult: float = 1.0,
+    ) -> "JudgmentWindows":
         # Anchors from ppy/osu TaikoHitWindows.cs at OD 0 / 5 / 10.
         # osu!stable truncates the interpolated windows to integers before
         # comparison, so a delta of exactly N ms with window 30.5 counts as OK
         # (game floors to 30, then |Δ| < 30 → OK). Match that behavior by
         # flooring the windows here rather than in every callsite.
         #
-        # `hit_window_mult` scales the tolerance for speed-mods (DT = 1/1.5)
-        # and difficulty-mods (HR = 1/1.4). Composes multiplicatively for
-        # combos (HDDT = 1/1.5; HRDT = 1/(1.5*1.4)).
+        # `od_mult` scales the OD NUMBER before window lookup: HR = 1.4,
+        # EZ = 0.5. Windows are then recomputed at the effective OD. This
+        # is the correct model for osu!taiko HR/EZ; multiplying the windows
+        # directly would give slightly different results because the OD→window
+        # function is piecewise linear.
+        #
+        # `hit_window_mult` scales the final wall-clock window after OD lookup.
+        # Used for speed mods only: DT = 1/1.5, HT = 1/0.75.
+        #
+        # Composes correctly for combos: HDDT windows at OD 6 = floor(base(6) *
+        # 1/1.5); HRDT windows at OD 6 = floor(base(min(6*1.4, 10)) * 1/1.5).
         import math
+        effective_od = min(od * od_mult, 10.0)
         return cls(
-            great=math.floor(_od_lerp(od, 50.0, 35.0, 20.0) * hit_window_mult),
-            ok=math.floor(_od_lerp(od, 120.0, 80.0, 50.0) * hit_window_mult),
-            miss=math.floor(_od_lerp(od, 135.0, 95.0, 70.0) * hit_window_mult),
+            great=math.floor(_od_lerp(effective_od, 50.0, 35.0, 20.0) * hit_window_mult),
+            ok=math.floor(_od_lerp(effective_od, 120.0, 80.0, 50.0) * hit_window_mult),
+            miss=math.floor(_od_lerp(effective_od, 135.0, 95.0, 70.0) * hit_window_mult),
         )
 
 
@@ -107,17 +121,25 @@ class JudgedReplay:
 def judge_replay(
     beatmap: TaikoBeatmap,
     replay: TaikoReplay,
+    od_mult: float = 1.0,
     hit_window_mult: float = 1.0,
 ) -> JudgedReplay:
     """Pair map notes with replay key-downs and classify each note.
 
-    `hit_window_mult` scales the OD-derived hit windows for mods that
-    tighten (DT, HR) or loosen (EZ, HT) tolerance. Callers typically pass
-    the value from `parse_mods(replay.meta.mods).hit_window_mult`. The
-    beatmap passed in should already be mod-scaled (via `apply_mods_to_beatmap`)
-    so note times line up with the replay's wall-clock event times."""
+    `od_mult` scales the OD NUMBER (HR = 1.4, EZ = 0.5). Windows are
+    then recomputed at the effective OD — this is how osu!taiko really
+    handles HR/EZ.
+
+    `hit_window_mult` scales the final wall-clock windows for speed
+    mods (DT = 1/1.5, HT = 1/0.75).
+
+    Callers typically pass both from `parse_mods(replay.meta.mods)`.
+    The beatmap passed in should already be mod-scaled (via
+    `apply_mods_to_beatmap`) so note times line up with the replay's
+    wall-clock event times."""
     windows = JudgmentWindows.from_od(
         beatmap.difficulty.overall_difficulty,
+        od_mult=od_mult,
         hit_window_mult=hit_window_mult,
     )
     hittable = beatmap.hittable()

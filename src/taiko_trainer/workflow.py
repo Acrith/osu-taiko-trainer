@@ -319,6 +319,7 @@ def add_replay(
         rate_map(
             play_features,
             od=bm.difficulty.overall_difficulty,
+            od_mult=mods.od_mult,
             hit_window_mult=mods.hit_window_mult,
             reading_mult=mods.reading_mult,
         )
@@ -327,7 +328,7 @@ def add_replay(
     )
 
     _report("judge", note=f"running per-note judgment ({mods.label})")
-    judged = judge_replay(play_bm, rp, hit_window_mult=mods.hit_window_mult)
+    judged = judge_replay(play_bm, rp, od_mult=mods.od_mult, hit_window_mult=mods.hit_window_mult)
     _report("classify", note=f"classifying {judged.count_miss} misses")
     classifications = classify_failures(judged, play_bm, play_features)
     summary = summarize_failures(classifications)
