@@ -92,6 +92,7 @@ def build_report(conn: sqlite3.Connection, top_n_maps: int = 5) -> TrainingRepor
         gimmick=snap["skill_gimmick"],
         technical=snap["skill_technical"],
         consistency=snap["skill_consistency"],
+        reading=snap["skill_reading"] or 0.0,
     )
     weakest = find_weakest_dim(skill)
 

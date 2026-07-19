@@ -644,7 +644,7 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--ground)
 .forecast-row .contrib-map:hover { color: var(--accent); }
 .forecast-row .contrib-map .muted { color: var(--ink-faint); }
 .forecast-row .contrib-val { color: var(--ink); font-weight: 500; font-size: 14px; }
-.hero-skill-mini { grid-template-columns: repeat(5, 1fr) !important; }
+.hero-skill-mini { grid-template-columns: repeat(6, 1fr) !important; }
 .hero-skill-mini .k { font-size: 8px !important; }
 .hero-skill-mini .v { font-size: 12px !important; }
 .radar-grid { fill: none; stroke: var(--rule); stroke-width: 1; opacity: 0.55; }
@@ -784,8 +784,9 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--ground)
 td.links { text-align: right; white-space: nowrap; }
 th.links-col { text-align: right; }
 /* skill progression small multiples */
-.prog-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 4px; }
-@media (max-width: 900px) { .prog-grid { grid-template-columns: repeat(2, 1fr); } }
+.prog-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 4px; }
+@media (max-width: 1100px) { .prog-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 700px)  { .prog-grid { grid-template-columns: repeat(2, 1fr); } }
 .prog-cell { display: flex; flex-direction: column; gap: 4px; padding: 8px 6px; border: 1px solid var(--rule); border-radius: 4px; background: var(--panel); }
 .prog-title { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); text-align: center; }
 .prog-chart { width: 100%; height: 88px; display: block; }
@@ -1131,6 +1132,7 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
           <div><span class="k">gim</span><span class="v">{d['gimmick']:.0f}</span></div>
           <div><span class="k">tech</span><span class="v">{d['technical']:.0f}</span></div>
           <div><span class="k">cons</span><span class="v">{d['consistency']:.0f}</span></div>
+          <div><span class="k">read</span><span class="v">{d['reading']:.0f}</span></div>
         </div>
       </div>
     </div>
