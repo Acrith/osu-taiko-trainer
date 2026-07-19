@@ -208,6 +208,29 @@ def create_app(workspace: str) -> FastAPI:
         resp.delete_cookie(key=auth_module.SESSION_COOKIE_NAME, path="/")
         return resp
 
+    @app.get("/api/auth/me")
+    def auth_me(session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME)):
+        """Tiny JSON endpoint used by the header widget to render the login
+        state client-side. Cheap: session-cookie decode + one row lookup.
+        Anonymous users get {logged_in: false}, no error status."""
+        if not auth_module.is_web_mode():
+            return JSONResponse({"mode": "local"})
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return JSONResponse({"mode": "web", "logged_in": False})
+        cat = open_catalog(workspace)
+        user = get_user_by_id(cat, uid)
+        cat.close()
+        if not user:
+            return JSONResponse({"mode": "web", "logged_in": False})
+        return JSONResponse({
+            "mode": "web",
+            "logged_in": True,
+            "osu_user_id": user["osu_user_id"],
+            "osu_username": user["osu_username"],
+            "osu_avatar_url": user["osu_avatar_url"],
+        })
+
     @app.get("/me")
     def me(session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME)):
         """Redirect to the logged-in user's public page. In local mode there
@@ -492,7 +515,12 @@ def create_app(workspace: str) -> FastAPI:
         return JSONResponse(summary)
 
     @app.post("/upload")
-    async def upload(request: Request, file: UploadFile = File(...), map_file: UploadFile | None = File(None)):
+    async def upload(
+        request: Request,
+        file: UploadFile = File(...),
+        map_file: UploadFile | None = File(None),
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
         # Save uploaded files to a persistent temp dir so the background thread can read them.
         # We clean it up in the worker.
         td = Path(tempfile.mkdtemp(prefix="tt-upload-"))
@@ -504,6 +532,41 @@ def create_app(workspace: str) -> FastAPI:
             map_path = td / (map_file.filename or "upload.osu")
             with open(map_path, "wb") as fh:
                 shutil.copyfileobj(map_file.file, fh)
+
+        # WEB mode identity gate: uploads require login, and the .osr's
+        # player field must match the logged-in user's osu_username.
+        # Without this, the competitive/comparison surfaces are meaningless
+        # (anyone could upload anyone's replays). LOCAL mode skips both.
+        if auth_module.is_web_mode():
+            viewer_uid = auth_module.read_session_cookie(session)
+            if viewer_uid is None:
+                shutil.rmtree(td, ignore_errors=True)
+                return HTMLResponse(
+                    _render_upload_error("Log in with osu! before uploading."),
+                    status_code=401,
+                )
+            cat = open_catalog(workspace)
+            user = get_user_by_id(cat, viewer_uid)
+            cat.close()
+            if not user:
+                shutil.rmtree(td, ignore_errors=True)
+                return HTMLResponse(_render_upload_error("Your session references an unknown user. Log in again."), status_code=401)
+            try:
+                probe = parse_osr_file(str(replay_path))
+            except Exception as e:
+                shutil.rmtree(td, ignore_errors=True)
+                return HTMLResponse(_render_upload_error(f"Could not parse the replay file: {e}"), status_code=400)
+            expected = (user["osu_username"] or "").lower()
+            actual = (probe.meta.player or "").lower()
+            if not expected or expected != actual:
+                shutil.rmtree(td, ignore_errors=True)
+                return HTMLResponse(
+                    _render_upload_error(
+                        f"This replay was played by <b>{probe.meta.player!r}</b>, but you are logged in as "
+                        f"<b>{user['osu_username']!r}</b>. Uploads must be your own plays."
+                    ),
+                    status_code=403,
+                )
 
         task_id = uuid.uuid4().hex[:10]
         with _UPLOAD_LOCK:
@@ -694,6 +757,19 @@ header.site nav a {
   text-transform: uppercase; color: var(--ink-muted); margin-left: 20px;
 }
 header.site nav a.active { color: var(--accent); }
+header.site nav { flex: 1; }
+
+/* Auth widget in the header (web mode only). JS populates it from
+   /api/auth/me; local mode leaves the div empty and it takes no space. */
+.auth-widget { display: flex; align-items: center; gap: 10px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; }
+.auth-widget:empty { display: none; }
+.auth-widget .avatar { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; border: 1px solid var(--rule); }
+.auth-widget .user { color: var(--ink); text-transform: none; letter-spacing: 0; }
+.auth-widget .login-btn { padding: 6px 14px; border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; text-transform: uppercase; letter-spacing: 0.14em; }
+.auth-widget .login-btn:hover { background: var(--accent); color: white; text-decoration: none; }
+.auth-widget form { margin: 0; padding: 0; display: inline; }
+.auth-widget .logout-btn { background: none; border: 1px solid var(--rule); color: var(--ink-muted); padding: 4px 10px; border-radius: 3px; font-family: inherit; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; }
+.auth-widget .logout-btn:hover { border-color: var(--miss); color: var(--miss); }
 .eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); }
 h1 { font-family: var(--font-mono); font-weight: 500; font-size: 32px; letter-spacing: -0.015em; margin: 4px 0 0 0; }
 h2 { font-family: var(--font-mono); font-weight: 500; font-size: 20px; margin: 0 0 8px 0; }
@@ -1656,6 +1732,7 @@ def _html_page(title: str, body: str, active: str = "") -> str:
   <header class="site">
     <span class="logo">taiko-trainer</span>
     <nav>{nav_html}</nav>
+    <div id="auth-widget" class="auth-widget"></div>
   </header>
   {body}
 </main>
@@ -1759,6 +1836,27 @@ def _html_page(title: str, body: str, active: str = "") -> str:
     setTimeout(poll, 800);
   }}
   poll();
+}})();
+
+// Auth widget — populates the header slot from /api/auth/me. Empty in
+// local mode. Anonymous in web mode gets a "Log in" button. Authenticated
+// gets avatar + username + logout button.
+(function() {{
+  const slot = document.getElementById('auth-widget');
+  if (!slot) return;
+  fetch('/api/auth/me').then(r => r.json()).then(a => {{
+    if (a.mode !== 'web') return;   // local mode: leave empty
+    if (!a.logged_in) {{
+      slot.innerHTML = '<a class="login-btn" href="/login">Log in with osu!</a>';
+      return;
+    }}
+    const name = a.osu_username;
+    const av = a.osu_avatar_url;
+    slot.innerHTML =
+      (av ? '<img class="avatar" src="' + av + '" alt="">' : '') +
+      '<a class="user" href="/u/' + encodeURIComponent(name) + '">' + name + '</a>' +
+      '<form method="post" action="/logout"><button type="submit" class="logout-btn">Logout</button></form>';
+  }}).catch(() => {{}});
 }})();
 </script>
 </body></html>"""
