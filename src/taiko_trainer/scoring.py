@@ -105,7 +105,7 @@ def _raw_speed(f: MapFeatures) -> float:
     return 45 * bpm_n + 20 * peak200_n + 15 * peak5s_n + 10 * peak1s_n + 10 * length3_n + 15 * span_n
 
 
-def _raw_stamina(f: MapFeatures) -> float:
+def _raw_stamina(f: MapFeatures, style: str = "kddk") -> float:
     # Stamina = weighted top-K aggregation of 20-second window intensities.
     # Sorted-descending window intensities are weighted by 0.85^rank and summed,
     # so the top-3 to top-5 windows dominate but the tail still contributes.
@@ -117,7 +117,18 @@ def _raw_stamina(f: MapFeatures) -> float:
     # Per-window intensity itself accounts for density, BPM, burst structure,
     # and mono runs. Pattern-parity (KDDK-hostile shapes) is not yet modelled.
     # See memory/feedback_stamina_model.md.
-    return f.strain.weighted_sum / 0.9
+    base = f.strain.weighted_sum / 0.9
+
+    if style in ("ddkk", "kkdd"):
+        # DDKK/KKDD map color-to-hand — a mono-color run is the SAME hand
+        # doing all the work. Amplify stamina for maps with sustained
+        # same-color chunks. First-pass calibration: needs feedback from
+        # real DDKK play data to tune the anchors.
+        mono_amp = 1.0 + 0.5 * _norm_up(f.color.run_length_max, 10, 50)
+        alt_penalty = 1.0 + 0.25 * (1.0 - f.color.color_change_ratio)
+        base *= mono_amp * alt_penalty
+
+    return base
 
 
 def _raw_gimmick(f: MapFeatures) -> float:
@@ -127,7 +138,7 @@ def _raw_gimmick(f: MapFeatures) -> float:
     return 55 * sv_bpm_n + 25 * unread_n + 20 * sv_changes_n
 
 
-def _raw_technical(f: MapFeatures) -> float:
+def _raw_technical(f: MapFeatures, style: str = "kddk") -> float:
     # Technical difficulty for KDDK players: hard rhythmic divisors + hard-
     # rhythm-switch transitions + stream-based KDDK-hostility. The stream
     # metric (see kddk_patterns.py) is the primary signal — it applies
@@ -173,6 +184,21 @@ def _raw_technical(f: MapFeatures) -> float:
     # (per-note color >=0.25). This is Blue Army's specific signature — 4 such
     # streams on Blue Army INNER ONI, 0 on Fool despite similar length.
     hostile_bonus = min(5.0, f.streams.hostile_long_count)
+
+    if style in ("ddkk", "kkdd"):
+        # DDKK/KKDD map color-to-hand, so the KDDK "hostile stream" concept
+        # (long streams with hand-alternation friction) doesn't apply the
+        # same way. Long same-color streams for DDKK are stamina, not
+        # technical. Drop hostile_bonus and heavily discount stream_n.
+        # Rhythmic hard-divisor content still counts identically.
+        return (
+            25 * tech_div_n
+            + 18 * q_n
+            + 12 * trans_n
+            + 8 * offgrid_n
+            + 5 * low_bpm_boost
+            + 10 * stream_n     # kept small — DDKK still needs to READ dense streams
+        )
 
     return (
         25 * tech_div_n
@@ -341,6 +367,7 @@ def rate_map(
     od_mult: float = 1.0,
     hit_window_mult: float = 1.0,
     reading_mult: float = 1.0,
+    style: str = "kddk",
 ) -> DimensionRating:
     """Rate the map on the six dimensions.
 
@@ -352,16 +379,22 @@ def rate_map(
     `reading_mult` is the HD reading multiplier (1.25 when HD is on) —
     HD doesn't change what feature extraction sees, it just makes what's
     there harder to visually process, so we apply it as a straight
-    multiplier on the reading dim after the structural signal is computed."""
+    multiplier on the reading dim after the structural signal is computed.
+
+    `style` picks between KDDK (default, primary calibration target) and
+    DDKK/KKDD (color-to-hand mapping). Currently only stamina + technical
+    have style-specific paths — the others (speed, gimmick, consistency,
+    reading) are style-neutral. DDKK numbers are FIRST-PASS and need real
+    play-data feedback to refine."""
     bonus = _length_bonus(features.hittable_notes)
     pressure = _od_pressure(od, od_mult=od_mult, hit_window_mult=hit_window_mult)
     cons_mult = 1.0 + _OD_BOOST_K_CONSISTENCY * (pressure - 1.0)
     tech_mult = 1.0 + _OD_BOOST_K_TECHNICAL   * (pressure - 1.0)
     return DimensionRating(
         speed=_shape(_raw_speed(features)) * bonus,
-        stamina=_shape(_raw_stamina(features)) * bonus,
+        stamina=_shape(_raw_stamina(features, style=style)) * bonus,
         gimmick=_shape(_raw_gimmick(features)) * bonus,
-        technical=_shape(_raw_technical(features)) * bonus * tech_mult,
+        technical=_shape(_raw_technical(features, style=style)) * bonus * tech_mult,
         consistency=_shape(_raw_consistency(features)) * bonus * cons_mult,
         reading=_shape(_raw_reading(features)) * bonus * reading_mult,
     )

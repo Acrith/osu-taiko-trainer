@@ -158,6 +158,12 @@ def refresh_ratings(workspace: str) -> None:
                 mods = parse_mods(rp.meta.mods)
                 play_bm = apply_mods_to_beatmap(bm, mods)
                 feats = extract_features(play_bm)
+                # Resolve style from player_info (per-DB). DDKK/KKDD trigger
+                # eff-rating recompute even for NM plays so skill vectors
+                # reflect their actual play cost model.
+                prow = conn.execute("SELECT style FROM player_info WHERE name = ?", (player,)).fetchone()
+                style = (prow["style"] if prow else "kddk") or "kddk"
+                style_alters = style in ("ddkk", "kkdd")
                 eff_rating = (
                     rate_map(
                         feats,
@@ -165,8 +171,9 @@ def refresh_ratings(workspace: str) -> None:
                         od_mult=mods.od_mult,
                         hit_window_mult=mods.hit_window_mult,
                         reading_mult=mods.reading_mult,
+                        style=style,
                     )
-                    if mods.alters_map else None
+                    if (mods.alters_map or style_alters) else None
                 )
                 judged = judge_replay(play_bm, rp, od_mult=mods.od_mult, hit_window_mult=mods.hit_window_mult)
                 classes = classify_failures(judged, play_bm, feats)

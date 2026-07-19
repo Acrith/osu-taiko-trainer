@@ -1281,6 +1281,13 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--ground)
 
 /* --- player hero style desc chip --- */
 .hero-style-desc { font-family: var(--font-mono); font-size: 11px; color: rgba(255,255,255,0.7); letter-spacing: 0.04em; }
+.hero-experimental {
+  display: inline-block; font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 8px;
+  border: 1px dashed rgba(232, 164, 58, 0.6); background: rgba(232, 164, 58, 0.08);
+  border-radius: 3px; color: #e8a43a; cursor: help; margin-left: 6px;
+}
+.hero-experimental:hover { background: rgba(232, 164, 58, 0.15); }
 .map-hero {
   position: relative;
   min-height: 260px;
@@ -1734,6 +1741,7 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
         <div class="hero-pill-row">
           <span class="diff-pill">{style_short}</span>
           <span class="hero-style-desc">{style_desc}</span>
+          {'<span class="hero-experimental" title="The DDKK/KKDD scoring model is a first-pass approximation. It correctly amplifies stamina for mono-color runs (single-hand grinding) and drops KDDK-specific parity friction from technical, but the specific weights and anchors were calibrated for KDDK play data. As real DDKK play history accumulates, the numbers will be refined. Expect some rating drift as the model matures.">DDKK model: experimental ⓘ</span>' if report.style in ("ddkk", "kkdd") else ""}
         </div>
         <h1 class="hero-title">{player}</h1>
         <p class="hero-artist">{_render_osu_subtitle(report)}</p>

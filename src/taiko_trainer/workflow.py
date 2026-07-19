@@ -315,6 +315,14 @@ def add_replay(
     # way so accuracy-pressure boost applies to consistency + technical.
     needs_reextract = mods.speed_mult != 1.0 or mods.scroll_mult != 1.0
     play_features = extract_features(play_bm) if needs_reextract else features
+
+    # Player's playstyle affects stamina + technical scoring. DDKK/KKDD
+    # players get style-specific ratings; KDDK is the default and doesn't
+    # need eff-rating storage unless mods altered something.
+    prow = plays.execute("SELECT style FROM player_info WHERE name = ?", (player,)).fetchone()
+    style = (prow["style"] if prow else "kddk") or "kddk"
+    style_alters = style in ("ddkk", "kkdd")
+
     play_rating = (
         rate_map(
             play_features,
@@ -322,8 +330,9 @@ def add_replay(
             od_mult=mods.od_mult,
             hit_window_mult=mods.hit_window_mult,
             reading_mult=mods.reading_mult,
+            style=style,
         )
-        if mods.alters_map
+        if (mods.alters_map or style_alters)
         else rating
     )
 
@@ -343,7 +352,7 @@ def add_replay(
         miss_patterns=miss_patterns,
         mods_bitfield=mods.bitfield,
         mods_label=mods.label,
-        effective_rating=play_rating if mods.alters_map else None,
+        effective_rating=play_rating if (mods.alters_map or style_alters) else None,
     )
 
     # Recompute the player's snapshot including the new replay. Use the
