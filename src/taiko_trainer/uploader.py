@@ -454,14 +454,47 @@ def cmd_init() -> int:
 
 
 def cmd_run() -> int:
-    """Start the watcher loop. Runs a backfill on startup so anything
-    the user recorded while the uploader was off gets caught up."""
+    """Start the watcher loop.
+
+    Does NOT auto-import your entire history on startup — that would be
+    thousands of files for anyone with a real osu! folder and would take
+    a long time before the watcher actually starts. If you want to import
+    your history, use `taiko-uploader backfill` explicitly (once).
+
+    On subsequent runs (state file exists with known uploads), does a
+    quiet catch-up scan for files recorded while the uploader was off.
+    """
     cfg = load_config()
     state = State(_state_path())
+
+    # First run heuristic: state is empty → skip backfill, print a hint.
+    # Second run onward: catch-up is fast (state already knows most files).
+    with sqlite3.connect(str(_state_path())) as _c:
+        known_count = _c.execute("SELECT COUNT(*) FROM uploaded").fetchone()[0]
+
     with httpx.Client() as client:
-        print("Backfilling existing replays…")
-        up, sk = backfill(cfg, state, client)
-        print(f"Backfill done: {up} uploaded, {sk} skipped/known\n")
+        if known_count == 0:
+            folder_files = 0
+            folder_p = Path(cfg.replays_folder)
+            if folder_p.is_dir():
+                folder_files = sum(1 for _ in folder_p.glob("*.osr"))
+            if folder_files > 20:
+                print(
+                    f"First run: skipping catch-up ({folder_files} .osr files in "
+                    f"{cfg.replays_folder}).\n"
+                    f"To import your existing history, stop this and run "
+                    f"`taiko-uploader backfill` first.\n"
+                )
+            else:
+                print("First run: catching up on existing replays…")
+                up, sk = backfill(cfg, state, client)
+                print(f"Catch-up done: {up} uploaded, {sk} skipped\n")
+        else:
+            print("Catching up on any replays saved while offline…")
+            up, sk = backfill(cfg, state, client)
+            if up + sk > 0:
+                print(f"Catch-up done: {up} uploaded, {sk} skipped\n")
+
         watch_and_upload(cfg, state, client)
     state.close()
     return 0
