@@ -1007,19 +1007,28 @@ main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 96px; display: grid
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 header.site {
-  display: flex; align-items: baseline; justify-content: space-between;
+  display: flex; align-items: center; gap: 24px;
   padding-bottom: 20px; border-bottom: 1px solid var(--rule);
 }
 header.site .logo {
   font-family: var(--font-mono); font-weight: 500; font-size: 22px;
-  letter-spacing: -0.01em; color: var(--ink);
+  letter-spacing: -0.01em; color: var(--ink); text-decoration: none;
+}
+header.site .logo:hover { color: var(--accent); text-decoration: none; }
+header.site nav {
+  flex: 1; display: flex; align-items: center; gap: 22px;
 }
 header.site nav a {
   font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em;
-  text-transform: uppercase; color: var(--ink-muted); margin-left: 20px;
+  text-transform: uppercase; color: var(--ink-muted);
 }
+header.site nav a:hover { color: var(--ink); text-decoration: none; }
 header.site nav a.active { color: var(--accent); }
-header.site nav { flex: 1; }
+/* Native browser tooltip on labels that have title="…". Subtle marker so users
+   know something's there without being noisy. */
+[title] { cursor: help; }
+.feat-row .k[title] { border-bottom: 1px dotted var(--rule); }
+.hint span[title] { border-bottom: 1px dotted var(--rule); cursor: help; }
 
 /* Auth widget in the header (web mode only). JS populates it from
    /api/auth/me; local mode leaves the div empty and it takes no space. */
@@ -1669,7 +1678,7 @@ def _render_player_hero(report, replays: list[dict], player: str) -> str:
         <p class="hero-artist">{_render_osu_subtitle(report)}</p>
         <p class="hero-meta">{report.replays} replays  ·  {sess_count} sessions  ·  {unique_maps} unique maps{("  ·  latest " + latest_date) if latest_date else ""}</p>
         <div class="hero-actions">
-          <a class="hero-btn" href="/">← Home</a>
+          {'<a class="hero-btn" href="/">← Home</a>' if not auth_module.is_web_mode() else ''}
           {_render_osu_profile_link(player, report)}
         </div>
       </div>
@@ -1991,7 +2000,15 @@ _CAUSE_COLORS = {
 
 
 def _html_page(title: str, body: str, active: str = "") -> str:
-    nav_items = [("Home", "/", "home")]
+    # Nav items are contextual per mode. Local mode keeps the operator "Home"
+    # link so an admin browsing the workspace can get back. Web mode has no
+    # "Home" — the logo itself links to `/` (which redirects to /me for
+    # authed users, landing for anon), so a separate Home item just duplicates.
+    # Future leaderboards + maps DB pages (Task #87) slot in here.
+    if auth_module.is_web_mode():
+        nav_items = []
+    else:
+        nav_items = [("Home", "/", "home")]
     nav_html = " ".join(
         f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>'
         for label, href, key in nav_items
@@ -2004,7 +2021,7 @@ def _html_page(title: str, body: str, active: str = "") -> str:
 </head><body>
 <main>
   <header class="site">
-    <span class="logo">taiko-trainer</span>
+    <a href="/" class="logo">taiko-trainer</a>
     <nav>{nav_html}</nav>
     <div id="auth-widget" class="auth-widget"></div>
   </header>
@@ -3099,7 +3116,15 @@ def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
 
   <section class="card">
     <h2>Timing</h2>
-    <p class="hint">delta mean {row['delta_mean_ms']:.1f} ms  ·  σ {row['delta_stddev_ms']:.1f} ms  ·  cheese rate {row['cheese_rate']*100:.2f}%  ·  fast-cheese pairs {row.get('fast_cheese_pairs', 0)}</p>
+    <p class="hint">
+      <span title="Average signed hit-delta across all judged notes. Negative = tended to hit early, positive = tended to hit late. Close to 0 = well-calibrated to the map.">avg delta {row['delta_mean_ms']:+.1f} ms ⓘ</span>
+      &nbsp;·&nbsp;
+      <span title="Standard deviation of hit deltas — how spread out your timing was. Lower is more consistent. Under 15 ms is very tight; over 25 ms means notable drift.">spread ±{row['delta_stddev_ms']:.1f} ms ⓘ</span>
+      &nbsp;·&nbsp;
+      <span title="Fraction of note pairs where BOTH keys of a two-color pattern were pressed within ~8ms — 'cheese' in taiko refers to double-tapping when you're supposed to alternate. High rate = you're smashing both keys instead of playing cleanly.">cheese rate {row['cheese_rate']*100:.2f}% ⓘ</span>
+      &nbsp;·&nbsp;
+      <span title="Absolute count of the fast-cheese pairs (same as cheese-rate, but the raw number). Useful to see if 0.5% comes from 5 pairs on a short map or 50 pairs on a long one.">cheese pairs {row.get('fast_cheese_pairs', 0)} ⓘ</span>
+    </p>
     {_render_timing_histogram(judged) if judged else ""}
   </section>
 """
@@ -3231,68 +3256,114 @@ def _render_features_panel(f) -> str:
     bpm_str = f"{m.bpm_max:.0f}" if same_bpm else f"{m.bpm_min:.0f}–{m.bpm_max:.0f}"
     duration_str = f"{int(d.duration_s)//60}:{int(d.duration_s)%60:02d}"
 
+    # Tooltip map for the feature labels that use domain shorthand or
+    # abbreviations. Rendered as HTML title="…" — native browser tooltip,
+    # no JS. Labels not in this map render without a tooltip.
+    tips = {
+        "peak 200ms burst": "Highest notes-per-second in any 200ms window. Captures short bursts (1/8 or 1/12 flurries) that show up in speed maps.",
+        "peak 1s NPS": "Highest notes-per-second sustained across any 1-second window. A 1s NPS of 15 means the densest second held 15 notes.",
+        "dominant divisor": "Most common note-to-note rhythmic gap: 1/4 (streams), 1/6 (bursts), 1/8, etc. Share is the % of note pairs with this gap.",
+        "high-density ratio": "Fraction of the map's duration spent in high-density windows (~top 30% of NPS). Roughly \"how much of the map is dense\".",
+        "longest sustained": "Longest continuous stretch in seconds where the note density stays above the map's mid-range NPS. Stamina test length.",
+        "strain (integrated)": "Sum of per-note strain across the map (Alchyr-style). Each note costs more at high BPM, mid-burst, or after long mono runs. Bigger = more accumulated fatigue by the end.",
+        "fatiguing windows": "Number of 10-second windows where accumulated strain exceeds the fatiguing threshold.",
+        "stream count": "Number of distinct dense streams (contiguous 1/4-or-tighter runs of ≥8 notes).",
+        "longest stream": "Length in notes of the map's single longest stream.",
+        "stream value (agg)": "Sum of Alchyr's stream-value curve across all streams. Length-6 ≈ 45; length-60 ≈ 60; length-200 saturates. Higher = more overall stream difficulty.",
+        "hostile-long (≥61 & parity ≥.25)": "Streams that are BOTH ≥61 notes long AND have per-note color friction ≥ 0.25. These break KDDK players (long chunks of hostile color = alternation-breaking fatigue).",
+        "top stream color": "Highest per-note color friction seen in any stream (0-1). 0 = pure KDDK-friendly alternation, 1 = full mono. 0.25+ is where things get uncomfortable.",
+        "divisor mix": "Distribution of note-to-note rhythmic gaps by divisor. A mix like 1/4 80% · 1/6 15% means occasional 1/6 bursts inside a mostly-1/4 map.",
+        "mono-run max": "Length of the longest same-color run anywhere in the map (KKKK... or DDDD...). High mono runs are stamina + finger-fatigue tests for KDDK players.",
+        "color-change ratio": "Fraction of consecutive note pairs where the color changed. High = alternating shapes (KDKD), low = mono chunks (KKKK).",
+        "SV range": "Slider-velocity min and max seen anywhere in the map. Wide range = strong SV manipulation.",
+        "SV stddev": "How wildly SV bounces around. Low = uniform scroll; high = chaotic SV changes (gimmick maps).",
+        "SV changes/min": "Rate of SV transitions per minute. High = constant scroll manipulation.",
+        "low-SV share": "Fraction of notes at SV < 0.75 (slow, clumped notes). Low-SV during dense play is the classic \"unreadable stack\" gimmick.",
+        "unreadable ratio": "Fraction of notes that are BOTH low-SV AND in a dense area — the specific case where scroll slows down while notes pile on.",
+        "sv-bpm score": "Composite: SV changes × SV stddev × BPM-dampening. High = SV chaos at moderate BPM, the canonical gimmick pattern.",
+        "parity mean": "Average per-note KDDK-parity friction across the map. 0 = perfectly alternating; 1 = every note hostile to KDDK alternation.",
+        "parity hostile ratio": "Fraction of notes where parity friction is high enough to actively hurt KDDK play (chunks that break the L-R-L-R cycle).",
+        "burst count": "Number of short (3-6 note) 1/4-or-tighter clusters. Bursts are speed features, not stream stamina.",
+        "burst mean length": "Average length of bursts. 3-4 = quick flurries; 5-6 = pushing into mini-stream territory.",
+        "longest burst": "Length in notes of the map's longest burst.",
+        "long-burst share (≥7)": "Fraction of bursts that are 7+ notes long — long enough that they start behaving like streams, not bursts.",
+        "dense p50 (bpm × sv)": "Median scroll velocity (BPM × SV) in the map's dense sections. 280+ is where notes \"smidge across the screen\" for KDDK players. Higher = the sustained scroll load is faster.",
+        "sustained-fast share": "Fraction of the map where scroll velocity holds above 280 units in a sustained window (not one-note SV spikes). Captures how much of the map is genuinely fast-scroll.",
+        "overall p95 (unfiltered)": "95th percentile scroll velocity across every note, dense sections OR sparse. Diagnostic only — not scored (spikes during rests don't test reading).",
+    }
+    def kv(label: str, value: str) -> str:
+        tip = tips.get(label, "")
+        title_attr = f' title="{tip}"' if tip else ""
+        marker = " ⓘ" if tip else ""
+        return (
+            f'<div class="feat-row">'
+            f'<span class="k"{title_attr}>{label}{marker}</span>'
+            f'<span class="v">{value}</span>'
+            f'</div>'
+        )
+
     return f"""
   <section class="card">
     <h2>Why this rating</h2>
-    <p class="hint">the underlying feature numbers, grouped by the dimension they feed</p>
+    <p class="hint">the underlying feature numbers, grouped by the dimension they feed. Hover any label with a ⓘ marker to see what it means.</p>
 
     <div class="feat-group">
       <div class="feat-title"><span>speed</span><span class="feat-val">{bpm_str} BPM · peak burst {d.peak_nps_200ms:.0f} n/s</span></div>
-      <div class="feat-row"><span class="k">BPM range</span><span class="v">{bpm_str}</span></div>
-      <div class="feat-row"><span class="k">peak 200ms burst</span><span class="v">{d.peak_nps_200ms:.1f} notes/s</span></div>
-      <div class="feat-row"><span class="k">peak 1s NPS</span><span class="v">{d.peak_nps:.1f}</span></div>
-      <div class="feat-row"><span class="k">dominant divisor</span><span class="v">{r.dominant_divisor} ({r.dominant_divisor_share*100:.0f}%)</span></div>
+      {kv("BPM range", bpm_str)}
+      {kv("peak 200ms burst", f"{d.peak_nps_200ms:.1f} notes/s")}
+      {kv("peak 1s NPS", f"{d.peak_nps:.1f}")}
+      {kv("dominant divisor", f"{r.dominant_divisor} ({r.dominant_divisor_share*100:.0f}%)")}
     </div>
 
     <div class="feat-group">
       <div class="feat-title"><span>stamina</span><span class="feat-val">avg {d.avg_nps:.1f} n/s over {duration_str}</span></div>
-      <div class="feat-row"><span class="k">duration</span><span class="v">{duration_str}</span></div>
-      <div class="feat-row"><span class="k">hittable notes</span><span class="v">{f.hittable_notes}</span></div>
-      <div class="feat-row"><span class="k">avg NPS</span><span class="v">{d.avg_nps:.1f}</span></div>
-      <div class="feat-row"><span class="k">peak 5s NPS</span><span class="v">{d.peak_nps_5s:.1f}</span></div>
-      <div class="feat-row"><span class="k">high-density ratio</span><span class="v">{d.high_density_ratio*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">longest sustained</span><span class="v">{d.longest_sustained_high_s:.0f} s</span></div>
-      <div class="feat-row"><span class="k">strain (integrated)</span><span class="v">{s.total:.0f}</span></div>
-      <div class="feat-row"><span class="k">fatiguing windows</span><span class="v">{s.fatiguing_windows}</span></div>
+      {kv("duration", duration_str)}
+      {kv("hittable notes", str(f.hittable_notes))}
+      {kv("avg NPS", f"{d.avg_nps:.1f}")}
+      {kv("peak 5s NPS", f"{d.peak_nps_5s:.1f}")}
+      {kv("high-density ratio", f"{d.high_density_ratio*100:.0f}%")}
+      {kv("longest sustained", f"{d.longest_sustained_high_s:.0f} s")}
+      {kv("strain (integrated)", f"{s.total:.0f}")}
+      {kv("fatiguing windows", str(s.fatiguing_windows))}
     </div>
 
     <div class="feat-group">
       <div class="feat-title"><span>technical</span><span class="feat-val">streams {f.streams.stream_count} · longest {f.streams.longest_stream} · hostile-long {f.streams.hostile_long_count}</span></div>
-      <div class="feat-row"><span class="k">stream count</span><span class="v">{f.streams.stream_count}</span></div>
-      <div class="feat-row"><span class="k">longest stream</span><span class="v">{f.streams.longest_stream}</span></div>
-      <div class="feat-row"><span class="k">stream value (agg)</span><span class="v">{f.streams.stream_value:.1f}</span></div>
-      <div class="feat-row"><span class="k">hostile-long (≥61 & parity ≥.25)</span><span class="v">{f.streams.hostile_long_count}</span></div>
-      <div class="feat-row"><span class="k">top stream color</span><span class="v">{f.streams.top_stream_color:.3f}</span></div>
-      <div class="feat-row"><span class="k">divisor mix</span><span class="v" style="font-size: 11px;">{div_row}</span></div>
-      <div class="feat-row"><span class="k">mono-run max</span><span class="v">{c.run_length_max}</span></div>
-      <div class="feat-row"><span class="k">color-change ratio</span><span class="v">{c.color_change_ratio*100:.0f}%</span></div>
+      {kv("stream count", str(f.streams.stream_count))}
+      {kv("longest stream", str(f.streams.longest_stream))}
+      {kv("stream value (agg)", f"{f.streams.stream_value:.1f}")}
+      {kv("hostile-long (≥61 & parity ≥.25)", str(f.streams.hostile_long_count))}
+      {kv("top stream color", f"{f.streams.top_stream_color:.3f}")}
+      {kv("divisor mix", div_row)}
+      {kv("mono-run max", str(c.run_length_max))}
+      {kv("color-change ratio", f"{c.color_change_ratio*100:.0f}%")}
     </div>
 
     <div class="feat-group">
       <div class="feat-title"><span>gimmick</span><span class="feat-val">SV σ {m.sv_stddev:.3f} · SV changes/min {m.sv_changes_per_minute:.1f}</span></div>
-      <div class="feat-row"><span class="k">SV range</span><span class="v">{m.sv_min:.2f} — {m.sv_max:.2f}</span></div>
-      <div class="feat-row"><span class="k">SV stddev</span><span class="v">{m.sv_stddev:.3f}</span></div>
-      <div class="feat-row"><span class="k">SV changes/min</span><span class="v">{m.sv_changes_per_minute:.1f}</span></div>
-      <div class="feat-row"><span class="k">low-SV share</span><span class="v">{g.low_sv_share*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">unreadable ratio</span><span class="v">{g.unreadable_ratio*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">sv-bpm score</span><span class="v">{g.sv_bpm_score:.1f}</span></div>
+      {kv("SV range", f"{m.sv_min:.2f} — {m.sv_max:.2f}")}
+      {kv("SV stddev", f"{m.sv_stddev:.3f}")}
+      {kv("SV changes/min", f"{m.sv_changes_per_minute:.1f}")}
+      {kv("low-SV share", f"{g.low_sv_share*100:.0f}%")}
+      {kv("unreadable ratio", f"{g.unreadable_ratio*100:.0f}%")}
+      {kv("sv-bpm score", f"{g.sv_bpm_score:.1f}")}
     </div>
 
     <div class="feat-group">
       <div class="feat-title"><span>consistency</span><span class="feat-val">parity {f.parity.hostile_ratio*100:.0f}% hostile · bursts {b.burst_count}</span></div>
-      <div class="feat-row"><span class="k">parity mean</span><span class="v">{f.parity.mean:.2f}</span></div>
-      <div class="feat-row"><span class="k">parity hostile ratio</span><span class="v">{f.parity.hostile_ratio*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">burst count</span><span class="v">{b.burst_count}</span></div>
-      <div class="feat-row"><span class="k">burst mean length</span><span class="v">{b.mean_length:.1f}</span></div>
-      <div class="feat-row"><span class="k">longest burst</span><span class="v">{b.max_length}</span></div>
-      <div class="feat-row"><span class="k">long-burst share (≥7)</span><span class="v">{b.length_7plus_ratio*100:.0f}%</span></div>
+      {kv("parity mean", f"{f.parity.mean:.2f}")}
+      {kv("parity hostile ratio", f"{f.parity.hostile_ratio*100:.0f}%")}
+      {kv("burst count", str(b.burst_count))}
+      {kv("burst mean length", f"{b.mean_length:.1f}")}
+      {kv("longest burst", str(b.max_length))}
+      {kv("long-burst share (≥7)", f"{b.length_7plus_ratio*100:.0f}%")}
     </div>
 
     <div class="feat-group">
       <div class="feat-title"><span>reading</span><span class="feat-val">dense scroll {f.reading.velocity_dense_p50:.0f} · sustained {f.reading.sustained_share*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">dense p50 (bpm × sv)</span><span class="v">{f.reading.velocity_dense_p50:.0f}</span></div>
-      <div class="feat-row"><span class="k">sustained-fast share</span><span class="v">{f.reading.sustained_share*100:.0f}%</span></div>
-      <div class="feat-row"><span class="k">overall p95 (unfiltered)</span><span class="v">{f.reading.velocity_p95:.0f}</span></div>
+      {kv("dense p50 (bpm × sv)", f"{f.reading.velocity_dense_p50:.0f}")}
+      {kv("sustained-fast share", f"{f.reading.sustained_share*100:.0f}%")}
+      {kv("overall p95 (unfiltered)", f"{f.reading.velocity_p95:.0f}")}
     </div>
   </section>"""
 
