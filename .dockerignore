@@ -1,0 +1,36 @@
+# Anything not needed at build time — smaller context = faster builds and
+# guarantees dev-only paths never leak into the image.
+
+.git
+.gitignore
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Local workspaces + scratch — these are dev data, not shipped
+references/
+scratch/
+scratchpad/
+testws/
+happy/
+watch-target/
+fake-home*/
+*.db
+*.db-journal
+*.sqlite
+
+# IDE + editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docs / build artifacts
+dist/
+build/
+*.egg-info/

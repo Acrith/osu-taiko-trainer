@@ -1,0 +1,76 @@
+# Local dev + reference production shape for taiko-trainer.
+#
+# Local dev usage:
+#   1. Copy .env.example to .env, fill in OAuth credentials
+#   2. `docker compose up --build`
+#   3. Visit http://localhost:8000
+#
+# Production usage (Cloudflare Tunnel in front):
+#   1. Set the env vars in the environment (secrets manager, not a file)
+#   2. `docker compose --profile prod up -d`
+#   3. cloudflared points at http://taiko-trainer:8000
+
+services:
+  taiko-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Restart on crash; healthcheck failures should also trigger the
+    # orchestrator to recycle in production, though a single container
+    # setup like this just needs "unless-stopped".
+    restart: unless-stopped
+
+    environment:
+      # Mode + auth — see auth.py for the full contract
+      TAIKO_TRAINER_MODE: ${TAIKO_TRAINER_MODE:-web}
+      OSU_OAUTH_CLIENT_ID: ${OSU_OAUTH_CLIENT_ID}
+      OSU_OAUTH_CLIENT_SECRET: ${OSU_OAUTH_CLIENT_SECRET}
+      OSU_OAUTH_REDIRECT_URI: ${OSU_OAUTH_REDIRECT_URI}
+      SESSION_SECRET: ${SESSION_SECRET}
+
+    volumes:
+      # Persistent SQLite workspace lives outside the image so container
+      # rebuilds / redeploys don't lose data. The named volume is managed
+      # by docker; use a bind mount instead if you want the files
+      # accessible on the host (`- ./workspace:/workspace`).
+      - workspace:/workspace
+
+    # Localhost publish only. In production, Cloudflare Tunnel talks to
+    # the container network directly — no need to expose the port on the
+    # host at all. Comment this out for a production deploy behind cloudflared.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # Basic hardening
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # SQLite needs write to the workspace mount
+    tmpfs:
+      - /tmp:size=100M
+
+  # Nightly SQLite backup. Snapshots the workspace to a separate volume
+  # so a container corruption or bad migration doesn't take the backups
+  # with it. Retention: 7 daily snapshots. See scripts/backup.sh for
+  # the actual copy logic.
+  backup:
+    profiles: ["prod"]
+    image: alpine:3.20
+    restart: unless-stopped
+    volumes:
+      - workspace:/workspace:ro
+      - backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache sqlite gzip coreutils
+        # Simple loop; production would use cron or systemd timer instead
+        while true; do
+          /backup.sh
+          sleep 86400
+        done
+
+volumes:
+  workspace:
+  backups:
