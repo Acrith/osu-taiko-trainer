@@ -286,3 +286,16 @@ def require_login(
 def login_redirect() -> RedirectResponse:
     """Build the /login redirect used on 401s. Caller sets the state cookie."""
     return RedirectResponse(url="/login", status_code=302)
+
+
+# --- API bearer token auth (uploader companion) -----------------------------
+
+def parse_bearer_header(authorization: str | None) -> str | None:
+    """Extract the raw token from an `Authorization: Bearer <token>` header,
+    or return None if the header is missing or malformed."""
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None

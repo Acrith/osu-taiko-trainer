@@ -96,6 +96,24 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_osu_id ON users(osu_user_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(osu_username);
+
+-- API tokens for the uploader companion (Task #67). Each token belongs to
+-- one user. Raw token value is shown once at creation and NEVER stored —
+-- only a SHA256 hash. The prefix ("tt_uploader_XXXXXX") is kept in plain
+-- text so users can identify tokens in the UI without seeing the secret.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                INTEGER NOT NULL,
+    label                  TEXT NOT NULL,           -- user-supplied ("My laptop")
+    prefix                 TEXT NOT NULL,           -- "tt_uploader_XXXXXX" — first 8 chars of raw, for UI
+    token_hash             TEXT NOT NULL UNIQUE,    -- sha256 hex of the raw token
+    created_at             TEXT NOT NULL,
+    last_used_at           TEXT,                    -- NULL until first use
+    revoked_at             TEXT                     -- NULL when active
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 """
 
 
@@ -217,6 +235,11 @@ def _migrate_catalog_schema(conn: sqlite3.Connection) -> None:
     existing = {r["name"] for r in conn.execute("PRAGMA table_info(maps)")}
     if "rating_reading" not in existing:
         conn.execute("ALTER TABLE maps ADD COLUMN rating_reading REAL")
+    # api_tokens table (Task #67) — CREATE IF NOT EXISTS in _CATALOG_SCHEMA
+    # handles the fresh case; nothing to migrate for existing catalogs
+    # since the whole table is new (older catalogs simply won't have it
+    # until this runs). The CREATE from the schema block above already
+    # ran by the time we're here, so no explicit ADD needed here.
     conn.commit()
 
 
@@ -541,6 +564,123 @@ def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, A
     ).fetchone()
     return dict(row) if row else None
 
+
+# -----------------------------------------------------------------------------
+# API tokens (uploader companion, Task #67)
+# -----------------------------------------------------------------------------
+
+_TOKEN_PREFIX = "tt_uploader_"
+
+
+def _hash_token(raw: str) -> str:
+    """SHA256 of the raw token, hex-encoded. Constant-length so
+    HMAC-style constant-time compare works cleanly, and one-way so a
+    DB dump doesn't reveal usable tokens."""
+    import hashlib
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def create_api_token(
+    conn: sqlite3.Connection,
+    user_id: int,
+    label: str,
+) -> str:
+    """Generate a new API token for `user_id`, store its hash, and return
+    the RAW token string. This is the only moment the raw token exists —
+    the caller must display it to the user immediately. It cannot be
+    recovered later (only hash is stored).
+
+    Format: `tt_uploader_<43-char-urlsafe-base64>`. The prefix makes
+    tokens visually identifiable in logs, config files, and secret-scanning
+    tools. 32 bytes of entropy is well beyond what's needed for auth."""
+    import secrets
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    raw = _TOKEN_PREFIX + secrets.token_urlsafe(32)
+    token_hash = _hash_token(raw)
+    # First 20 chars of the raw token are shown in the UI ("tt_uploader_XXXX...")
+    # so the user can distinguish tokens without exposing the whole secret.
+    display_prefix = raw[:20]
+    conn.execute(
+        f"""
+        INSERT INTO {schema}.api_tokens
+            (user_id, label, prefix, token_hash, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (int(user_id), label.strip() or "unnamed", display_prefix, token_hash, _now()),
+    )
+    conn.commit()
+    return raw
+
+
+def verify_api_token(conn: sqlite3.Connection, raw: str) -> int | None:
+    """Look up a raw token → user_id, updating last_used_at on success.
+    Returns None on any failure (unknown, revoked, or malformed).
+
+    Uses constant-time comparison on the hash lookup so timing side
+    channels can't leak partial hash matches."""
+    if not raw or not raw.startswith(_TOKEN_PREFIX):
+        return None
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    token_hash = _hash_token(raw)
+    row = conn.execute(
+        f"""
+        SELECT id, user_id, revoked_at FROM {schema}.api_tokens
+        WHERE token_hash = ?
+        """,
+        (token_hash,),
+    ).fetchone()
+    if not row or row["revoked_at"] is not None:
+        return None
+    # Best-effort update; not critical if this fails (e.g. read-only replica).
+    try:
+        conn.execute(
+            f"UPDATE {schema}.api_tokens SET last_used_at = ? WHERE id = ?",
+            (_now(), int(row["id"])),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    return int(row["user_id"])
+
+
+def list_api_tokens(conn: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
+    """All tokens belonging to `user_id`, active + revoked, newest first.
+    Never includes token_hash — display-only fields."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    rows = conn.execute(
+        f"""
+        SELECT id, label, prefix, created_at, last_used_at, revoked_at
+        FROM {schema}.api_tokens
+        WHERE user_id = ?
+        ORDER BY (revoked_at IS NULL) DESC, created_at DESC
+        """,
+        (int(user_id),),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_api_token(
+    conn: sqlite3.Connection, user_id: int, token_id: int
+) -> bool:
+    """Mark a token as revoked (still visible in the settings UI, but
+    verify_api_token rejects it). Ownership-scoped so User A can't revoke
+    User B's tokens. Returns True if a row was actually revoked."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    cur = conn.execute(
+        f"""
+        UPDATE {schema}.api_tokens
+        SET revoked_at = ?
+        WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+        """,
+        (_now(), int(token_id), int(user_id)),
+    )
+    conn.commit()
+    return (cur.rowcount or 0) > 0
+
+
+# -----------------------------------------------------------------------------
+# Player linkage (workspace)
+# -----------------------------------------------------------------------------
 
 def link_player_to_user(conn: sqlite3.Connection, player_name: str, user_id: int) -> None:
     """Set the user_id on a per-player DB's player_info row. Called when a

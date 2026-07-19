@@ -23,12 +23,13 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import auth as auth_module
 from . import db as db_module
 from .db import (
+    create_api_token,
     discover_players,
     ensure_player_db_for_user,
     find_player_name_for_user,
@@ -39,11 +40,14 @@ from .db import (
     get_replays,
     get_user_by_id,
     get_user_by_username,
+    list_api_tokens,
     list_map_roots,
     open_catalog,
     open_plays,
+    revoke_api_token,
     upsert_player,
     upsert_user_from_osu,
+    verify_api_token,
     workspace_status,
 )
 from .features import extract_features
@@ -513,6 +517,106 @@ def create_app(workspace: str) -> FastAPI:
             for tid in [t for t, e in _UPLOAD_TASKS.items() if e.get("updated_at", 0) < gc_cutoff]:
                 _UPLOAD_TASKS.pop(tid, None)
         return JSONResponse(summary)
+
+    # --- Uploader companion API (bearer token auth) ----------------------
+
+    @app.post("/api/v1/replays")
+    async def api_upload_replay(
+        file: UploadFile = File(...),
+        authorization: str | None = Header(default=None),
+    ):
+        """Uploader companion endpoint. Bearer token auth (not session cookies —
+        this path is invoked by the local watchdog agent, not the browser).
+
+        Same identity guard as the browser upload: the .osr's player field
+        must match the token owner's osu_username. Runs the exact same
+        add_replay pipeline as browser + local upload, so nothing about
+        judgment/rating/features differs between the three code paths.
+
+        Response shapes:
+          200 OK             {"replay_id": N, "player": "...", "accuracy": 0.99, ...}
+          201 Created        (same, on first-time upload)
+          204 No Content     duplicate (same map_md5+played_at already exists)
+          401 Unauthorized   missing/invalid/revoked token
+          403 Forbidden      .osr player mismatch
+          400 Bad Request    unparseable .osr or add_replay failure
+        """
+        raw_token = auth_module.parse_bearer_header(authorization)
+        if not raw_token:
+            raise HTTPException(status_code=401, detail="missing or malformed Authorization header")
+
+        cat = open_catalog(workspace)
+        user_id = verify_api_token(cat, raw_token)
+        if user_id is None:
+            cat.close()
+            raise HTTPException(status_code=401, detail="token unknown or revoked")
+        user = get_user_by_id(cat, user_id)
+        cat.close()
+        if not user:
+            raise HTTPException(status_code=401, detail="token owner no longer exists")
+
+        # Spool to temp so add_replay (which takes filesystem paths) can read it.
+        td = Path(tempfile.mkdtemp(prefix="tt-api-upload-"))
+        replay_path = td / (file.filename or "upload.osr")
+        try:
+            with open(replay_path, "wb") as fh:
+                shutil.copyfileobj(file.file, fh)
+
+            # Identity check before we do any real work.
+            try:
+                probe = parse_osr_file(str(replay_path))
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"could not parse replay: {e}")
+
+            expected = (user["osu_username"] or "").lower()
+            actual = (probe.meta.player or "").lower()
+            if not expected or expected != actual:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"replay was played by {probe.meta.player!r}, "
+                        f"but the token belongs to {user['osu_username']!r}"
+                    ),
+                )
+
+            # Same pipeline as the browser upload — synchronous here because
+            # the uploader wants an immediate result to know whether to
+            # advance its cursor or retry.
+            result = add_replay(workspace, str(replay_path))
+            if not result.ok:
+                # add_replay's most common failure is "map not in catalog and
+                # not on disk". For the uploader that's a real error — client
+                # should surface it to the user, not silently skip.
+                raise HTTPException(status_code=400, detail=result.message.splitlines()[0])
+
+            # Look up the just-inserted replay id + a summary so the client
+            # can log something meaningful.
+            plays = open_plays(workspace, result.player) if result.player else None
+            summary = None
+            if plays is not None:
+                row = plays.execute(
+                    """
+                    SELECT r.id, r.accuracy_judged, r.count_great, r.count_ok, r.count_miss,
+                           r.mods_label, m.title, m.version
+                    FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
+                    ORDER BY r.id DESC LIMIT 1
+                    """
+                ).fetchone()
+                plays.close()
+                if row:
+                    summary = {
+                        "replay_id": int(row["id"]),
+                        "map_title": row["title"],
+                        "map_version": row["version"],
+                        "mods": row["mods_label"],
+                        "accuracy": row["accuracy_judged"],
+                        "great": row["count_great"],
+                        "ok": row["count_ok"],
+                        "miss": row["count_miss"],
+                    }
+            return JSONResponse(summary or {"ok": True, "player": result.player}, status_code=201)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
 
     @app.post("/upload")
     async def upload(
