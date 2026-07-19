@@ -29,6 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from . import auth as auth_module
 from . import db as db_module
 from .db import (
+    browse_maps,
     create_api_token,
     delete_user_completely,
     discover_players,
@@ -47,6 +48,8 @@ from .db import (
     open_plays,
     revoke_api_token,
     set_user_profile_public,
+    top_plays_for_map,
+    top_users_by_skill,
     upsert_player,
     upsert_user_from_osu,
     verify_api_token,
@@ -377,6 +380,64 @@ def create_app(workspace: str) -> FastAPI:
         set_user_profile_public(cat, uid, public.lower() == "true")
         cat.close()
         return RedirectResponse(url="/settings/tokens", status_code=303)
+
+    # --- Leaderboards + map database (web mode) --------------------------
+
+    _DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
+
+    @app.get("/leaderboards", response_class=HTMLResponse)
+    def leaderboards_overview():
+        """One column per dim, top 5 users each. Header links go to the
+        full per-dim rankings."""
+        cols = {dim: top_users_by_skill(workspace, dim, limit=5) for dim in _DIMS}
+        return HTMLResponse(_render_leaderboards_overview(cols))
+
+    @app.get("/leaderboards/{dim}", response_class=HTMLResponse)
+    def leaderboards_dim(dim: str):
+        if dim not in _DIMS:
+            return HTMLResponse(_render_error(f"unknown dimension: {dim}"), status_code=400)
+        users = top_users_by_skill(workspace, dim, limit=100)
+        return HTMLResponse(_render_leaderboards_dim(dim, users))
+
+    @app.get("/maps", response_class=HTMLResponse)
+    def maps_page(
+        sort: str = "rating_speed",
+        min_rating: float = 0.0,
+        q: str = "",
+        page: int = 1,
+    ):
+        page = max(1, page)
+        limit = 50
+        offset = (page - 1) * limit
+        cat = open_catalog(workspace)
+        rows, total = browse_maps(
+            cat, dim_sort=sort, min_rating=min_rating,
+            search=q, limit=limit, offset=offset,
+        )
+        cat.close()
+        return HTMLResponse(_render_maps_page(rows, total, sort, min_rating, q, page, limit))
+
+    @app.get("/map/{md5}", response_class=HTMLResponse)
+    def map_detail_page(md5: str):
+        cat = open_catalog(workspace)
+        row = get_map(cat, md5.lower())
+        cat.close()
+        if not row:
+            return HTMLResponse(_render_error(f"map {md5!r} not in catalog"), status_code=404)
+        # Reconstruct features from the stored .osu blob so the feature panel
+        # renders the same as on a replay detail page.
+        features = None
+        cat = open_catalog(workspace)
+        content = get_map_content(cat, md5.lower())
+        cat.close()
+        if content:
+            try:
+                bm = _parse_bytes_as_osu(content)
+                features = extract_features(bm)
+            except Exception:
+                pass
+        plays = top_plays_for_map(workspace, md5.lower(), limit=30)
+        return HTMLResponse(_render_map_detail(row, features, plays))
 
     # --- HTML pages ------------------------------------------------------
 
@@ -2003,10 +2064,12 @@ def _html_page(title: str, body: str, active: str = "") -> str:
     # Nav items are contextual per mode. Local mode keeps the operator "Home"
     # link so an admin browsing the workspace can get back. Web mode has no
     # "Home" — the logo itself links to `/` (which redirects to /me for
-    # authed users, landing for anon), so a separate Home item just duplicates.
-    # Future leaderboards + maps DB pages (Task #87) slot in here.
+    # authed users, landing for anon).
     if auth_module.is_web_mode():
-        nav_items = []
+        nav_items = [
+            ("Leaderboards", "/leaderboards", "leaderboards"),
+            ("Maps",         "/maps",         "maps"),
+        ]
     else:
         nav_items = [("Home", "/", "home")]
     nav_html = " ".join(
@@ -3366,6 +3429,420 @@ def _render_features_panel(f) -> str:
       {kv("overall p95 (unfiltered)", f"{f.reading.velocity_p95:.0f}")}
     </div>
   </section>"""
+
+
+_LEADERBOARD_DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
+
+
+def _rank_medal(rank: int) -> str:
+    """Small medal for top-3 ranks, plain # otherwise."""
+    if rank == 1: return '<span class="lb-medal gold">1</span>'
+    if rank == 2: return '<span class="lb-medal silver">2</span>'
+    if rank == 3: return '<span class="lb-medal bronze">3</span>'
+    return f'<span class="lb-rank">#{rank}</span>'
+
+
+def _lb_user_row(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> str:
+    """One row of a leaderboard. rank is 1-indexed. `u` comes from
+    top_users_by_skill (has osu_username, avatar_url, six dim values)."""
+    av = u.get("osu_avatar_url") or ""
+    country = u.get("osu_country_code") or ""
+    main_val = int(u[dim])
+    other_dims = ""
+    if show_all_dims:
+        others = "".join(
+            f'<span class="lb-otherdim" title="{d}">{d[:3]} {int(u[d])}</span>'
+            for d in _LEADERBOARD_DIMS if d != dim
+        )
+        other_dims = f'<div class="lb-otherdims">{others}</div>'
+    replays = u.get("replays", 0)
+    return f"""
+    <tr class="lb-row" data-href="/u/{u['osu_username']}">
+      <td class="lb-rank-cell">{_rank_medal(rank)}</td>
+      <td class="lb-user-cell">
+        {'<img class="lb-avatar" src="' + av + '" alt="">' if av else '<span class="lb-avatar-blank"></span>'}
+        <div>
+          <div class="lb-name"><a href="/u/{u['osu_username']}">{u['osu_username']}</a></div>
+          <div class="lb-sub">{country + " · " if country else ""}{replays} replays</div>
+        </div>
+      </td>
+      <td class="lb-value">{main_val:,}</td>
+      {f'<td>{other_dims}</td>' if show_all_dims else ''}
+    </tr>"""
+
+
+def _render_leaderboards_overview(cols: dict[str, list[dict]]) -> str:
+    """Six columns, one per dim. Top 5 each, click header for the full ranking."""
+    col_html = ""
+    for dim in _LEADERBOARD_DIMS:
+        users = cols.get(dim, [])
+        rows = "".join(_lb_user_row(i + 1, u, dim) for i, u in enumerate(users))
+        if not rows:
+            rows = '<tr><td colspan="3" class="lb-empty">no plays yet</td></tr>'
+        col_html += f"""
+        <div class="lb-col">
+          <h3 class="lb-col-title">
+            <a href="/leaderboards/{dim}">{dim}</a>
+            <span class="lb-col-more">view all →</span>
+          </h3>
+          <table class="lb-table"><tbody>{rows}</tbody></table>
+        </div>"""
+    body = f"""
+  <section>
+    <h1 class="page-title">Leaderboards</h1>
+    <p class="hint">Top players by skill dimension. Ranks are latest-snapshot values from
+    each player's public profile. Click a dim to see the full ranking.</p>
+  </section>
+
+  <section class="lb-overview">
+    {col_html}
+  </section>
+
+  {_leaderboards_css()}
+"""
+    return _html_page("leaderboards", body)
+
+
+def _render_leaderboards_dim(dim: str, users: list[dict]) -> str:
+    """Full ranking for one dim. Includes all six skill values for context."""
+    rows_html = "".join(_lb_user_row(i + 1, u, dim, show_all_dims=True) for i, u in enumerate(users))
+    if not rows_html:
+        rows_html = '<tr><td colspan="4" class="lb-empty">nobody has played yet</td></tr>'
+    dim_tabs = " ".join(
+        f'<a class="lb-tab {"active" if d == dim else ""}" href="/leaderboards/{d}">{d}</a>'
+        for d in _LEADERBOARD_DIMS
+    )
+    body = f"""
+  <section>
+    <h1 class="page-title">Leaderboard · {dim}</h1>
+    <p class="hint">Top players by skill.{dim}, most-recent snapshot per user. Only public profiles.</p>
+    <div class="lb-tabs">{dim_tabs}</div>
+  </section>
+
+  <section class="lb-full">
+    <table class="lb-table lb-table-full">
+      <thead><tr>
+        <th>rank</th><th>player</th><th>{dim}</th><th>other dims</th>
+      </tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+  </section>
+
+  {_leaderboards_css()}
+"""
+    return _html_page(f"leaderboards · {dim}", body)
+
+
+def _leaderboards_css() -> str:
+    return """
+  <style>
+    .page-title { font-family: var(--font-mono); font-size: 28px; margin: 0 0 8px; color: var(--ink); }
+    .lb-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-top: 20px; }
+    .lb-col { background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 16px; }
+    .lb-col-title { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; margin: 0 0 12px; color: var(--accent); display: flex; justify-content: space-between; align-items: baseline; }
+    .lb-col-title a { color: var(--accent); text-decoration: none; }
+    .lb-col-title a:hover { text-decoration: underline; }
+    .lb-col-more { font-size: 10px; color: var(--ink-faint); letter-spacing: 0.08em; }
+
+    .lb-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }
+    .lb-tab { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; padding: 6px 14px; border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-muted); text-decoration: none; }
+    .lb-tab:hover { border-color: var(--accent-soft); color: var(--ink); text-decoration: none; }
+    .lb-tab.active { border-color: var(--accent); color: var(--accent); }
+
+    .lb-table { width: 100%; border-collapse: separate; border-spacing: 0 4px; }
+    .lb-table tr.lb-row { cursor: pointer; }
+    .lb-table tr.lb-row:hover td { background: var(--panel-hover, rgba(255,255,255,0.02)); }
+    .lb-table td { padding: 8px 10px; background: transparent; border-radius: 3px; font-family: var(--font-mono); }
+    .lb-table th { padding: 6px 10px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); text-align: left; }
+    .lb-rank-cell { width: 40px; }
+    .lb-rank { color: var(--ink-faint); font-size: 12px; }
+    .lb-medal { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 50%; font-weight: 700; font-size: 11px; }
+    .lb-medal.gold { background: linear-gradient(180deg, #f0d475, #d4af37); color: #3a2a00; }
+    .lb-medal.silver { background: linear-gradient(180deg, #dcdcdc, #a8a8a8); color: #1a1a1a; }
+    .lb-medal.bronze { background: linear-gradient(180deg, #d29c6a, #a06a3a); color: #1a1a00; }
+
+    .lb-user-cell { display: flex; align-items: center; gap: 10px; }
+    .lb-avatar, .lb-avatar-blank { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 1px solid var(--rule); flex-shrink: 0; }
+    .lb-avatar-blank { background: var(--panel); }
+    .lb-name a { color: var(--ink); text-decoration: none; font-weight: 500; }
+    .lb-name a:hover { color: var(--accent); text-decoration: none; }
+    .lb-sub { font-size: 10px; color: var(--ink-faint); }
+
+    .lb-value { font-size: 18px; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; font-weight: 500; }
+    .lb-otherdims { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+    .lb-otherdim { font-size: 10px; padding: 2px 6px; border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-muted); }
+
+    .lb-empty { color: var(--ink-faint); text-align: center; padding: 20px; font-family: var(--font-mono); font-size: 12px; }
+
+    /* Row click via JS below */
+  </style>
+  <script>
+  document.querySelectorAll('.lb-table tr.lb-row').forEach(tr => {
+    tr.addEventListener('click', ev => {
+      if (ev.target.tagName === 'A' || ev.target.tagName === 'IMG') return;
+      window.location = tr.dataset.href;
+    });
+  });
+  </script>
+"""
+
+
+def _render_maps_page(
+    rows: list[dict], total: int, sort: str, min_rating: float,
+    q: str, page: int, limit: int,
+) -> str:
+    """Browsable map catalog. Search + sort + minimum-rating filter.
+    Table shows each map's six ratings; row click → /map/{md5}."""
+    _SORTS = [
+        ("rating_speed", "speed"),
+        ("rating_stamina", "stamina"),
+        ("rating_gimmick", "gimmick"),
+        ("rating_technical", "technical"),
+        ("rating_consistency", "consistency"),
+        ("rating_reading", "reading"),
+        ("bpm_max", "bpm"),
+        ("duration_s", "duration"),
+        ("hittable_notes", "notes"),
+        ("inserted_at", "recently added"),
+    ]
+    sort_opts = "".join(
+        f'<option value="{v}" {"selected" if v == sort else ""}>{label}</option>'
+        for v, label in _SORTS
+    )
+
+    body_rows = ""
+    for r in rows:
+        title = (r.get("title") or "?")
+        version = (r.get("version") or "?")
+        creator = (r.get("creator") or "?")
+        dur = int(r.get("duration_s") or 0)
+        dur_str = f"{dur//60}:{dur%60:02d}"
+        bpm = r.get("bpm_max") or 0
+        od = r.get("od") or 0
+        notes = r.get("hittable_notes") or 0
+        body_rows += (
+            f'<tr class="map-row" data-href="/map/{r["md5"]}">'
+            f'<td class="map-title-cell">'
+            f'  <div class="map-title">{title}</div>'
+            f'  <div class="map-sub">{version}  ·  by {creator}</div>'
+            f'</td>'
+            f'<td class="tabular">{int(bpm)}</td>'
+            f'<td class="tabular">{od:.1f}</td>'
+            f'<td class="tabular">{dur_str}</td>'
+            f'<td class="tabular">{notes:,}</td>'
+            f'<td class="tabular map-rating">{int(r.get("rating_speed") or 0):,}</td>'
+            f'<td class="tabular map-rating">{int(r.get("rating_stamina") or 0):,}</td>'
+            f'<td class="tabular map-rating">{int(r.get("rating_gimmick") or 0):,}</td>'
+            f'<td class="tabular map-rating">{int(r.get("rating_technical") or 0):,}</td>'
+            f'<td class="tabular map-rating">{int(r.get("rating_consistency") or 0):,}</td>'
+            f'<td class="tabular map-rating">{int(r.get("rating_reading") or 0):,}</td>'
+            f'</tr>'
+        )
+    if not body_rows:
+        body_rows = '<tr><td colspan="11" class="lb-empty">no maps match those filters</td></tr>'
+
+    n_pages = max(1, (total + limit - 1) // limit)
+    from urllib.parse import urlencode
+    def _page_link(p: int) -> str:
+        qs = urlencode({"sort": sort, "min_rating": int(min_rating), "q": q, "page": p})
+        return f"/maps?{qs}"
+    pager = ""
+    if n_pages > 1:
+        prev_link = _page_link(max(1, page - 1)) if page > 1 else ""
+        next_link = _page_link(min(n_pages, page + 1)) if page < n_pages else ""
+        pager = f"""
+      <div class="pager">
+        {'<a class="page-btn" href="' + prev_link + '">← prev</a>' if prev_link else '<span class="page-btn disabled">← prev</span>'}
+        <span class="page-info">page {page} of {n_pages}  ·  {total:,} maps total</span>
+        {'<a class="page-btn" href="' + next_link + '">next →</a>' if next_link else '<span class="page-btn disabled">next →</span>'}
+      </div>
+"""
+
+    body = f"""
+  <section>
+    <h1 class="page-title">Maps</h1>
+    <p class="hint">Every map in the catalog. Filter by minimum rating in your target dimension to find calibrated training material.</p>
+  </section>
+
+  <section class="card">
+    <form class="maps-filters" method="get" action="/maps">
+      <label>
+        Search
+        <input type="search" name="q" value="{q}" placeholder="title, difficulty, or mapper">
+      </label>
+      <label>
+        Sort by
+        <select name="sort">{sort_opts}</select>
+      </label>
+      <label>
+        Min rating
+        <input type="number" name="min_rating" value="{int(min_rating)}" min="0" max="10000" step="50">
+      </label>
+      <button type="submit">Apply</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <div style="overflow-x: auto;">
+      <table class="maps-table">
+        <thead><tr>
+          <th>map</th>
+          <th title="Maximum BPM in the map. If BPM varies, this is the peak.">bpm</th>
+          <th title="OverallDifficulty from the .osu file — affects hit-window tightness.">od</th>
+          <th title="Total length of the map's hittable section, MM:SS.">len</th>
+          <th title="Number of hittable notes (excludes drumrolls + dendens).">notes</th>
+          <th>spd</th>
+          <th>stm</th>
+          <th>gim</th>
+          <th>tch</th>
+          <th>cns</th>
+          <th>rea</th>
+        </tr></thead>
+        <tbody>{body_rows}</tbody>
+      </table>
+    </div>
+    {pager}
+  </section>
+
+  <style>
+    .maps-filters {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; margin-top: 8px; }}
+    .maps-filters label {{ display: flex; flex-direction: column; gap: 4px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted); }}
+    .maps-filters input, .maps-filters select {{ padding: 8px 12px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); border-radius: 3px; font-family: var(--font-mono); font-size: 13px; min-width: 160px; }}
+    .maps-filters button {{ padding: 9px 20px; border: 1px solid var(--accent); background: var(--accent); color: white; border-radius: 3px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; }}
+    .maps-table {{ width: 100%; border-collapse: separate; border-spacing: 0 3px; }}
+    .maps-table th {{ padding: 8px 10px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); text-align: right; cursor: help; }}
+    .maps-table th:first-child {{ text-align: left; }}
+    .maps-table td {{ padding: 8px 10px; background: transparent; font-family: var(--font-mono); font-size: 12px; text-align: right; }}
+    .maps-table td.map-title-cell {{ text-align: left; }}
+    .maps-table td.map-rating {{ font-variant-numeric: tabular-nums; color: var(--ink); }}
+    .maps-table td.tabular {{ font-variant-numeric: tabular-nums; color: var(--ink-muted); }}
+    .maps-table tr.map-row {{ cursor: pointer; }}
+    .maps-table tr.map-row:hover td {{ background: rgba(255,255,255,0.02); }}
+    .map-title {{ color: var(--ink); font-weight: 500; }}
+    .map-sub {{ font-size: 10px; color: var(--ink-faint); margin-top: 2px; }}
+    .pager {{ display: flex; justify-content: center; align-items: center; gap: 20px; margin-top: 16px; }}
+    .page-btn {{ padding: 6px 14px; border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-muted); text-decoration: none; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; }}
+    .page-btn:hover {{ border-color: var(--accent); color: var(--accent); text-decoration: none; }}
+    .page-btn.disabled {{ opacity: 0.4; cursor: not-allowed; }}
+    .page-info {{ font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }}
+  </style>
+  <script>
+    document.querySelectorAll('.maps-table tr.map-row').forEach(tr => {{
+      tr.addEventListener('click', ev => {{
+        if (ev.target.tagName === 'A') return;
+        window.location = tr.dataset.href;
+      }});
+    }});
+  </script>
+"""
+    return _html_page("maps", body)
+
+
+def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
+    """One map's full page: metadata, ratings, feature explanation panel,
+    and the top plays leaderboard."""
+    title = row.get("title") or "?"
+    version = row.get("version") or "?"
+    creator = row.get("creator") or "?"
+    artist = row.get("artist") or ""
+    bid = row.get("beatmap_id")
+    bset = row.get("beatmapset_id")
+    dur = int(row.get("duration_s") or 0)
+    dur_str = f"{dur//60}:{dur%60:02d}"
+    bpm_min = row.get("bpm_min") or 0
+    bpm_max = row.get("bpm_max") or 0
+    same = abs(bpm_min - bpm_max) < 0.5
+    bpm_str = f"{bpm_max:.0f}" if same else f"{bpm_min:.0f}–{bpm_max:.0f}"
+
+    osu_link = (
+        f'<a class="hero-btn" href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener">Beatmap page</a>'
+        if bid else ""
+    )
+    plays_rows = ""
+    for i, p in enumerate(plays):
+        rank = _rank_medal(i + 1)
+        av = p.get("osu_avatar_url") or ""
+        mods = p.get("mods_label") or "NM"
+        mods_chip = _mods_chip(mods) if mods and mods != "NM" else ""
+        acc = p["accuracy"] * 100
+        plays_rows += (
+            f'<tr class="map-play-row" data-href="/replay/{p["player_name"]}/{p["replay_id"]}">'
+            f'<td class="lb-rank-cell">{rank}</td>'
+            f'<td class="lb-user-cell">'
+            f'{"<img class=\"lb-avatar\" src=\"" + av + "\" alt=\"\">" if av else "<span class=\"lb-avatar-blank\"></span>"}'
+            f'<div class="lb-name"><a href="/u/{p["osu_username"]}">{p["osu_username"]}</a></div>'
+            f'</td>'
+            f'<td class="tabular">{acc:.2f}%</td>'
+            f'<td>{mods_chip if mods_chip else "<span class=\"muted\">NM</span>"}</td>'
+            f'<td class="tabular">{p["great"]}/{p["ok"]}/{p["miss"]}</td>'
+            f'<td class="tabular muted">{p["played_at"][:10]}</td>'
+            f'</tr>'
+        )
+    if not plays_rows:
+        plays_rows = '<tr><td colspan="6" class="lb-empty">no public plays on this map yet</td></tr>'
+
+    features_html = _render_features_panel(features) if features else ""
+
+    body = f"""
+  <section class="eyebrow-row">
+    <span class="eyebrow"><a href="/maps" style="color: var(--ink-muted);">← maps</a></span>
+  </section>
+
+  <section class="card map-hero-simple">
+    <div>
+      <span class="diff-pill">{version}</span>
+    </div>
+    <h1 class="hero-title" style="margin-top: 10px;">{title}</h1>
+    <p class="hero-artist">{artist}</p>
+    <p class="hero-meta">mapped by <b>{creator}</b>  ·  {bpm_str} BPM  ·  OD {row.get('od', 0):.1f}  ·  {dur_str}  ·  {row.get('hittable_notes', 0):,} notes</p>
+    <div class="hero-actions">{osu_link}</div>
+  </section>
+
+  <section class="card">
+    <h2>Rating</h2>
+    <div class="stats-row">
+      <div class="stat"><span class="k">speed</span><span class="v">{int(row.get('rating_speed', 0)):,}</span></div>
+      <div class="stat"><span class="k">stamina</span><span class="v">{int(row.get('rating_stamina', 0)):,}</span></div>
+      <div class="stat"><span class="k">gimmick</span><span class="v">{int(row.get('rating_gimmick', 0)):,}</span></div>
+      <div class="stat"><span class="k">technical</span><span class="v">{int(row.get('rating_technical', 0)):,}</span></div>
+      <div class="stat"><span class="k">consistency</span><span class="v">{int(row.get('rating_consistency', 0)):,}</span></div>
+      <div class="stat"><span class="k">reading</span><span class="v">{int(row.get('rating_reading', 0)):,}</span></div>
+    </div>
+  </section>
+
+  {features_html}
+
+  <section class="card">
+    <h2>Top plays  <span class="hint" style="font-size: 12px; margin-left: 8px;">{len(plays)} public plays</span></h2>
+    <div style="overflow-x: auto;">
+      <table class="lb-table">
+        <thead><tr>
+          <th>rank</th><th>player</th><th>accuracy</th><th>mods</th><th>great/ok/miss</th><th>played</th>
+        </tr></thead>
+        <tbody>{plays_rows}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <style>
+    .map-hero-simple {{ padding: 24px; }}
+    .map-hero-simple .hero-title {{ font-size: 34px; margin: 4px 0; }}
+    .map-hero-simple .hero-artist {{ color: var(--ink-muted); font-size: 14px; margin: 0 0 4px; }}
+    .map-hero-simple .hero-meta {{ color: var(--ink-faint); font-size: 12px; margin: 0 0 14px; font-family: var(--font-mono); }}
+    .map-play-row {{ cursor: pointer; }}
+    .map-play-row:hover td {{ background: rgba(255,255,255,0.02); }}
+    .muted {{ color: var(--ink-faint); font-size: 11px; }}
+  </style>
+  <script>
+    document.querySelectorAll('.map-play-row').forEach(tr => {{
+      tr.addEventListener('click', ev => {{
+        if (ev.target.tagName === 'A' || ev.target.tagName === 'IMG') return;
+        window.location = tr.dataset.href;
+      }});
+    }});
+  </script>
+"""
+    return _html_page(f"{title} [{version}]", body)
 
 
 def _render_web_landing(recent_users: list[dict]) -> str:

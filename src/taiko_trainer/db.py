@@ -578,6 +578,221 @@ def set_user_profile_public(
     conn.commit()
 
 
+# -----------------------------------------------------------------------------
+# Leaderboards + map database queries (web mode)
+#
+# The current architecture keeps replays + snapshots in per-user .db files.
+# Global aggregations (top-N users by skill dim, top-N plays on a map) need
+# to iterate every file. That's O(N users) sqlite opens per page load — fine
+# at hundreds of users, would need materialization at thousands.
+#
+# Small in-process cache keeps sequential clicks fast without a real cache
+# layer. TTL 60s so a new upload appears within a minute.
+# -----------------------------------------------------------------------------
+
+import time as _time
+
+_LEADERBOARD_CACHE: dict[tuple, tuple[float, Any]] = {}
+_CACHE_TTL_S = 60.0
+
+
+def _cached(key: tuple, fn):
+    """Simple TTL cache. Key must be hashable; fn is a zero-arg callable that
+    computes the value on miss. Not thread-safe, but the FastAPI event loop
+    serializes per request anyway."""
+    now = _time.time()
+    hit = _LEADERBOARD_CACHE.get(key)
+    if hit and (now - hit[0]) < _CACHE_TTL_S:
+        return hit[1]
+    val = fn()
+    _LEADERBOARD_CACHE[key] = (now, val)
+    return val
+
+
+def top_users_by_skill(
+    workspace: str | Path,
+    dim: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Rank public-profile users by their latest snapshot's skill_{dim}.
+    Returns list of dicts with osu_username, avatar, dim value, plus
+    the six dim numbers for a quick sub-row display.
+
+    Iterates each user's DB — O(users). Cached for TTL so rapid clicks
+    across dim tabs share results."""
+    _DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
+    if dim not in _DIMS:
+        raise ValueError(f"unknown dim {dim!r}")
+
+    def compute():
+        ws = Path(workspace)
+        cat = open_catalog(ws)
+        users = cat.execute(
+            """
+            SELECT id, osu_username, osu_avatar_url, osu_country_code, osu_global_rank
+            FROM users WHERE profile_public = 1
+            """
+        ).fetchall()
+        cat.close()
+
+        rows: list[dict[str, Any]] = []
+        for u in users:
+            player_name = find_player_name_for_user(ws, int(u["id"]))
+            if not player_name:
+                continue
+            p = player_db_path(ws, player_name)
+            if not p.exists():
+                continue
+            try:
+                pconn = sqlite3.connect(str(p))
+                pconn.row_factory = sqlite3.Row
+                snap = pconn.execute(
+                    """
+                    SELECT skill_speed, skill_stamina, skill_gimmick,
+                           skill_technical, skill_consistency, skill_reading,
+                           replays_used, latest_replay_played_at
+                    FROM snapshots ORDER BY id DESC LIMIT 1
+                    """
+                ).fetchone()
+                pconn.close()
+            except sqlite3.OperationalError:
+                continue
+            if not snap:
+                continue
+            row = {
+                "osu_username": u["osu_username"],
+                "osu_avatar_url": u["osu_avatar_url"],
+                "osu_country_code": u["osu_country_code"],
+                "osu_global_rank": u["osu_global_rank"],
+                "replays": int(snap["replays_used"]),
+                "latest_played_at": snap["latest_replay_played_at"],
+            }
+            for d in _DIMS:
+                row[d] = float(snap[f"skill_{d}"] or 0)
+            rows.append(row)
+
+        rows.sort(key=lambda r: -r[dim])
+        return rows[:limit]
+
+    return _cached(("top_users", str(workspace), dim, limit), compute)
+
+
+def top_plays_for_map(
+    workspace: str | Path,
+    map_md5: str,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Best plays on a given map, ordered by accuracy_judged. Includes the
+    player's osu_username + avatar so the list is renderable without
+    additional lookups. Mods stay per-play (not grouped) — the caller can
+    tab by mods_label if desired.
+
+    Iterates each user's replays — O(users). Cached."""
+    def compute():
+        ws = Path(workspace)
+        cat = open_catalog(ws)
+        users = cat.execute(
+            """
+            SELECT id, osu_username, osu_avatar_url
+            FROM users WHERE profile_public = 1
+            """
+        ).fetchall()
+        cat.close()
+
+        plays: list[dict[str, Any]] = []
+        for u in users:
+            player_name = find_player_name_for_user(ws, int(u["id"]))
+            if not player_name:
+                continue
+            p = player_db_path(ws, player_name)
+            if not p.exists():
+                continue
+            try:
+                pconn = sqlite3.connect(str(p))
+                pconn.row_factory = sqlite3.Row
+                rows = pconn.execute(
+                    """
+                    SELECT id, played_at, accuracy_judged, count_great,
+                           count_ok, count_miss, mods_label
+                    FROM replays WHERE map_md5 = ?
+                    ORDER BY accuracy_judged DESC LIMIT 5
+                    """,
+                    (map_md5,),
+                ).fetchall()
+                pconn.close()
+            except sqlite3.OperationalError:
+                continue
+            for r in rows:
+                plays.append({
+                    "replay_id": int(r["id"]),
+                    "player_name": player_name,
+                    "osu_username": u["osu_username"],
+                    "osu_avatar_url": u["osu_avatar_url"],
+                    "accuracy": float(r["accuracy_judged"]),
+                    "great": int(r["count_great"]),
+                    "ok": int(r["count_ok"]),
+                    "miss": int(r["count_miss"]),
+                    "mods_label": r["mods_label"] or "NM",
+                    "played_at": r["played_at"],
+                })
+
+        plays.sort(key=lambda p: -p["accuracy"])
+        return plays[:limit]
+
+    return _cached(("top_plays_map", str(workspace), map_md5, limit), compute)
+
+
+def browse_maps(
+    conn: sqlite3.Connection,
+    dim_sort: str = "rating_speed",
+    min_rating: float = 0.0,
+    search: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Paginated map catalog browse. Returns (rows, total_count). Only
+    counts pass rating filter + search substring on title/version/creator.
+
+    dim_sort must be one of the rating columns; other input goes through
+    parameterized queries so it's safe from injection."""
+    _ALLOWED_SORT = {
+        "rating_speed", "rating_stamina", "rating_gimmick",
+        "rating_technical", "rating_consistency", "rating_reading",
+        "bpm_max", "hittable_notes", "duration_s", "inserted_at",
+    }
+    if dim_sort not in _ALLOWED_SORT:
+        dim_sort = "rating_speed"
+
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    like = f"%{search.strip()}%" if search else "%"
+
+    total = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM {schema}.maps
+        WHERE (title LIKE ? OR version LIKE ? OR creator LIKE ?)
+          AND COALESCE({dim_sort}, 0) >= ?
+        """,
+        (like, like, like, float(min_rating)),
+    ).fetchone()[0]
+
+    rows = conn.execute(
+        f"""
+        SELECT md5, artist, title, version, creator, beatmap_id, beatmapset_id,
+               duration_s, hittable_notes, bpm_min, bpm_max, od,
+               rating_speed, rating_stamina, rating_gimmick,
+               rating_technical, rating_consistency,
+               COALESCE(rating_reading, 0) AS rating_reading
+        FROM {schema}.maps
+        WHERE (title LIKE ? OR version LIKE ? OR creator LIKE ?)
+          AND COALESCE({dim_sort}, 0) >= ?
+        ORDER BY {dim_sort} DESC
+        LIMIT ? OFFSET ?
+        """,
+        (like, like, like, float(min_rating), int(limit), int(offset)),
+    ).fetchall()
+    return [dict(r) for r in rows], int(total)
+
+
 def delete_user_completely(
     workspace: str | Path, user_id: int
 ) -> dict[str, Any]:
