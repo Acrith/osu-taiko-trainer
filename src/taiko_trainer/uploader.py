@@ -476,54 +476,33 @@ def cmd_init() -> int:
 def cmd_run() -> int:
     """Start the watcher loop.
 
-    Watches for NEW plays only. Never touches historic .osr — those stay
-    on your disk untouched unless you explicitly run `taiko-uploader
-    backfill` to import them.
+    Contract: `run` only uploads files that appear AFTER it starts. Every
+    file already in the folder at startup is marked as "hands off" and
+    the watcher never touches it.
 
-    On first launch: marks every existing .osr in the folder as
-    "seen, skipped" in local state. From then on the watcher only fires
-    on files that appear AFTER first launch. Between runs, if you played
-    while the uploader was off, those new files still get picked up
-    (they weren't seen at first-launch snapshot time, so they're not
-    marked, so catch-up handles them).
+    Consequence: plays made while the uploader was offline are NOT
+    caught up automatically — the next `run` marks them historic too.
+    If you want them, use `taiko-uploader backfill` explicitly. This is
+    the tradeoff for the "never touches history without asking" guarantee.
     """
     cfg = load_config()
     state = State(_state_path())
     folder = Path(cfg.replays_folder)
 
-    with sqlite3.connect(str(_state_path())) as _c:
-        known_count = _c.execute("SELECT COUNT(*) FROM uploaded").fetchone()[0]
-
-    if known_count == 0:
-        # First run — snapshot the folder so historic files are permanently
-        # ignored. This is idempotent: state gets one row per file, with
-        # replay_id=NULL and map_title=SKIPPED_HISTORIC to identify why.
-        if not folder.is_dir():
-            print(f"WARNING: replays folder {folder} doesn't exist yet — "
-                  f"will pick up files once you create it.")
-        else:
-            existing = list(folder.glob("*.osr"))
-            for p in existing:
-                state.record(p.name, "", None,
-                             {"map_title": "SKIPPED_HISTORIC"})
-            print(f"First run: snapshotted {len(existing)} existing "
-                  f".osr as skipped (history import off).")
-            print("Use `taiko-uploader backfill` if you want to import "
-                  "some or all of them later.\n")
+    # Snapshot the folder: every existing .osr not already in state gets
+    # marked SKIPPED_HISTORIC. Files already in state (uploaded or
+    # previously snapshotted) are a no-op — state.known() returns True.
+    if not folder.is_dir():
+        print(f"WARNING: replays folder {folder} doesn't exist yet — "
+              f"will pick up files once you create it.")
     else:
-        # Later runs: quiet catch-up for anything played while offline.
-        # Only NEW files (not in state) trigger uploads.
-        with httpx.Client() as client:
-            new_files = [
-                p for p in folder.glob("*.osr")
-                if folder.is_dir() and not state.known(p.name)
-            ] if folder.is_dir() else []
-            if new_files:
-                print(f"Catching up on {len(new_files)} replays saved "
-                      f"while offline…")
-                for p in new_files:
-                    _process_one(client, cfg, state, p)
-                print()
+        newly_marked = 0
+        for p in folder.glob("*.osr"):
+            if not state.known(p.name):
+                state.record(p.name, "", None, {"map_title": "SKIPPED_HISTORIC"})
+                newly_marked += 1
+        if newly_marked > 0:
+            print(f"Snapshotted {newly_marked} existing .osr — watcher will only see NEW plays.")
 
     with httpx.Client() as client:
         watch_and_upload(cfg, state, client)
