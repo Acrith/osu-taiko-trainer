@@ -23,7 +23,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import Cookie, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import auth as auth_module
@@ -270,6 +270,80 @@ def create_app(workspace: str) -> FastAPI:
         flash_ok = request.query_params.get("ok", "")
         flash_err = request.query_params.get("err", "")
         return _render_report(report, replays, name, flash_ok=flash_ok, flash_err=flash_err)
+
+    # --- Public player pages (web mode, canonical URLs) ------------------
+    # /u/{osu_username} — public profile page. Resolves via catalog.users
+    # → linked per-player DB. Respects the user's profile_public flag: a
+    # private profile 404s to anonymous viewers but still opens for the
+    # profile owner (self-view). Same view function is used for /player/{name}
+    # in local mode — the only meaningful difference is how the DB is
+    # located and the privacy check.
+
+    def _resolve_public_profile(osu_username: str, viewer_uid: int | None):
+        """Look up a user by their osu! username → linked per-player DB →
+        privacy check. Returns (report, replays, player_name, target_user)
+        on success, or raises HTTPException(404/403).
+
+        A missing users row is 404. A private profile viewed by anyone
+        other than the owner is 404 (deliberately not 403 — hide existence
+        from strangers)."""
+        cat = open_catalog(workspace)
+        target_user = get_user_by_username(cat, osu_username)
+        cat.close()
+        if not target_user:
+            raise HTTPException(status_code=404, detail=f"unknown user {osu_username!r}")
+
+        is_owner = viewer_uid is not None and viewer_uid == target_user["id"]
+        if not target_user.get("profile_public", 1) and not is_owner:
+            raise HTTPException(status_code=404, detail="profile not found")
+
+        player_name = find_player_name_for_user(workspace, target_user["id"])
+        if not player_name:
+            raise HTTPException(status_code=404, detail="user has no play data yet")
+
+        conn = open_plays(workspace, player_name)
+        report = build_report(conn)
+        replays = get_replays(conn) if report else []
+        conn.close()
+        return report, replays, player_name, target_user
+
+    @app.get("/u/{osu_username}", response_class=HTMLResponse)
+    def public_player_page(
+        osu_username: str,
+        request: Request,
+        viewer_uid: int | None = Depends(auth_module.current_user_id),
+    ):
+        try:
+            report, replays, player_name, _ = _resolve_public_profile(osu_username, viewer_uid)
+        except HTTPException as e:
+            return HTMLResponse(_render_error(f"{e.detail}"), status_code=e.status_code)
+        if report is None:
+            return HTMLResponse(_render_error(f"{osu_username} has no snapshots yet."), status_code=404)
+        flash_ok = request.query_params.get("ok", "")
+        flash_err = request.query_params.get("err", "")
+        return _render_report(report, replays, player_name, flash_ok=flash_ok, flash_err=flash_err)
+
+    @app.get("/u/{osu_username}/train/{dim}", response_class=HTMLResponse)
+    def public_train_page(
+        osu_username: str,
+        dim: str,
+        viewer_uid: int | None = Depends(auth_module.current_user_id),
+    ):
+        if dim not in ("speed", "stamina", "gimmick", "technical", "consistency", "reading"):
+            return HTMLResponse(_render_error(f"unknown dimension: {dim}"), status_code=400)
+        try:
+            report, replays, player_name, _ = _resolve_public_profile(osu_username, viewer_uid)
+        except HTTPException as e:
+            return HTMLResponse(_render_error(f"{e.detail}"), status_code=e.status_code)
+        if report is None:
+            return HTMLResponse(_render_error(f"{osu_username} has no snapshots yet."), status_code=404)
+        played_md5s = {r["map_md5"] for r in replays}
+        conn = open_plays(workspace, player_name)
+        from .suggest import suggest_maps
+        suggestions = suggest_maps(conn, report.skill, dim, top_n=25, exclude_md5s=played_md5s)
+        contribs = report.dim_contributors.get(dim, ()) if hasattr(report, "dim_contributors") else ()
+        conn.close()
+        return _render_train_page(player_name, dim, report.skill, suggestions, contribs)
 
     @app.get("/player/{name}/train/{dim}", response_class=HTMLResponse)
     def train_page(name: str, dim: str):
