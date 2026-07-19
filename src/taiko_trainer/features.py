@@ -838,7 +838,10 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
     return ReadingProfile(
         velocity_p95=_pctile(velocities, 0.95),
         velocity_dense_p95=_pctile(dense_velocities, 0.95) if dense_velocities else 0.0,
-        high_scroll_share=sum(1 for v in velocities if v > 350) / n,
+        # 280 units = ~200 BPM at SV 1.4 (or 230 BPM at HR standard SV). This
+        # is where a KDDK-level player starts feeling "notes smidge across the
+        # screen" — anything above counts as fast scroll for share purposes.
+        high_scroll_share=sum(1 for v in velocities if v > 280) / n,
         peak_velocity=max(dense_velocities) if dense_velocities else max(velocities),
     )
 

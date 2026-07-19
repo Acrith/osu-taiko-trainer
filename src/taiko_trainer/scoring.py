@@ -261,13 +261,23 @@ def _raw_reading(f: MapFeatures) -> float:
     consistent SV=2.5 map at high BPM is 0 gimmick but heavy reading —
     the scroll just rushes at you and reaction time is the bottleneck.
 
-    Anchors: 220 = comfortable moderate scroll (mid-tier Oni), 550 =
-    challenging (high-SV Inner Oni or high-BPM standard-SV), 700+ is
-    where reading dominates every other skill.
+    Anchors calibrated to the "notes smidge across the screen" band:
+
+        <180  no meaningful reading load (Kantan / low-BPM Futsuu)
+        180   normalization floor — where scroll starts feeling brisk
+        280   "starts feeling fast" (200 BPM HR, or 230 BPM standard-SV)
+        420   dense_p95 saturation — semifinals-tier reading (230 HR, 265+ NM)
+        550   peak saturation — extreme scroll (HRDT bands, rate-boosted
+              280+ BPM maps)
+
+    Reference points a top KDDK player validated:
+        The Fool [Stamina Thief] NM  → dense_p95 ~230 → very low reading
+        The Fool [Stamina Thief] HR  → dense_p95 ~322 → semifinals-tier hard
+        The Fool [Stamina Thief] HRDT→ dense_p95 ~483 → extreme
     """
-    dense_p95_n = _norm_up(f.reading.velocity_dense_p95, 220, 550)
-    peak_n      = _norm_up(f.reading.peak_velocity, 300, 700)
-    share_n     = _norm(f.reading.high_scroll_share, 0.15, 0.75)
+    dense_p95_n = _norm_up(f.reading.velocity_dense_p95, 180, 420)
+    peak_n      = _norm_up(f.reading.peak_velocity, 240, 550)
+    share_n     = _norm(f.reading.high_scroll_share, 0.10, 0.65)
     # Weighted: dense-p95 is the main signal (what does dense play LOOK like),
     # peak is a smaller kicker (one hard section), share captures duration
     # (does the reading load persist or is it a single spike?).
