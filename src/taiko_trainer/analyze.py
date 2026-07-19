@@ -84,7 +84,7 @@ def _find_pair(dim_dir: Path) -> Pair | None:
 
     beatmap = parse_osu_file(matched)
     features = extract_features(beatmap)
-    rating = rate_map(features)
+    rating = rate_map(features, od=beatmap.difficulty.overall_difficulty)
     return Pair(
         dimension=dim_dir.name,
         replay_path=osr_path,

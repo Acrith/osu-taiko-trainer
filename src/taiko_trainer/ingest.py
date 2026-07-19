@@ -61,7 +61,7 @@ def ingest(workspace: str, root: str) -> None:
             continue
         content = osu_path.read_bytes()
         feats = extract_features(bm)
-        rating = rate_map(feats)
+        rating = rate_map(feats, od=bm.difficulty.overall_difficulty)
         upsert_map(catalog, bm, feats, rating, content)
         stored += 1
     catalog.close()
@@ -128,7 +128,7 @@ def refresh_ratings(workspace: str) -> None:
             print(f"  SKIP {row['title']} [{row['version']}]: parse error {e}")
             continue
         feats = extract_features(bm)
-        rating = rate_map(feats)
+        rating = rate_map(feats, od=bm.difficulty.overall_difficulty)
         upsert_map(catalog, bm, feats, rating, content)
         refreshed += 1
     catalog.close()
@@ -157,7 +157,10 @@ def refresh_ratings(workspace: str) -> None:
                 mods = parse_mods(rp.meta.mods)
                 play_bm = apply_mods_to_beatmap(bm, mods)
                 feats = extract_features(play_bm)
-                eff_rating = rate_map(feats) if mods.alters_map else None
+                eff_rating = (
+                    rate_map(feats, od=bm.difficulty.overall_difficulty, hit_window_mult=mods.hit_window_mult)
+                    if mods.alters_map else None
+                )
                 judged = judge_replay(play_bm, rp, hit_window_mult=mods.hit_window_mult)
                 classes = classify_failures(judged, play_bm, feats)
                 summary = summarize_failures(classes)

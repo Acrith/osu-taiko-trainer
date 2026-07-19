@@ -253,12 +253,53 @@ def _raw_consistency(f: MapFeatures) -> float:
     return base + flat_reward - tech_penalty - hard_div_penalty - stream_penalty
 
 
-def rate_map(features: MapFeatures) -> DimensionRating:
+def _od_pressure(od: float, hit_window_mult: float = 1.0) -> float:
+    """How much tighter accuracy is vs the OD 5 baseline (great window = 35 ms).
+
+    Returns:
+        1.0  at OD 5, nomod (the baseline).
+        > 1  when the effective GREAT window is narrower — higher OD, DT, HR, or combos.
+        < 1  when it's wider — lower OD, EZ, HT.
+
+    Used to modulate consistency and (to a smaller extent) technical:
+    a fast map at OD 4 rewards fewer accuracy skills than the same map at OD 8;
+    HR + DT stack this even further because both shrink the window."""
+    from .judgment import _od_lerp
+    window = _od_lerp(od, 50.0, 35.0, 20.0) * hit_window_mult
+    return 35.0 / max(window, 1.0)
+
+
+# How strongly each dimension responds to accuracy pressure. Consistency is
+# ~pure accuracy so it moves the most; technical is partially accuracy (hard
+# divisors + timing) so it moves half as much; the rest (speed, stamina,
+# gimmick) don't depend on OD in a way that's separable from the structural
+# signals they already capture.
+_OD_BOOST_K_CONSISTENCY = 0.35
+_OD_BOOST_K_TECHNICAL   = 0.20
+
+
+def rate_map(
+    features: MapFeatures,
+    *,
+    od: float = 5.0,
+    hit_window_mult: float = 1.0,
+) -> DimensionRating:
+    """Rate the map on the five dimensions.
+
+    `od` is the map's OverallDifficulty (from `.osu`). `hit_window_mult` is
+    the accuracy-tightening from mods (see `mods.parse_mods`). Callers that
+    already handled mods by scaling the beatmap (BPM/time) still need to
+    pass `hit_window_mult` here so accuracy pressure enters the rating
+    correctly — HR alone doesn't change BPM but does tighten windows, so
+    it lands on this path alone."""
     bonus = _length_bonus(features.hittable_notes)
+    pressure = _od_pressure(od, hit_window_mult)
+    cons_mult = 1.0 + _OD_BOOST_K_CONSISTENCY * (pressure - 1.0)
+    tech_mult = 1.0 + _OD_BOOST_K_TECHNICAL   * (pressure - 1.0)
     return DimensionRating(
         speed=_shape(_raw_speed(features)) * bonus,
         stamina=_shape(_raw_stamina(features)) * bonus,
         gimmick=_shape(_raw_gimmick(features)) * bonus,
-        technical=_shape(_raw_technical(features)) * bonus,
-        consistency=_shape(_raw_consistency(features)) * bonus,
+        technical=_shape(_raw_technical(features)) * bonus * tech_mult,
+        consistency=_shape(_raw_consistency(features)) * bonus * cons_mult,
     )

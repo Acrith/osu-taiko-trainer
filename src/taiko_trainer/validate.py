@@ -79,7 +79,7 @@ def validate() -> int:
             continue
         bm = parse_osu_file(osu_path)
         f = extract_features(bm)
-        r = rate_map(f).as_dict()
+        r = rate_map(f, od=bm.difficulty.overall_difficulty).as_dict()
         winner = max(r.items(), key=lambda kv: kv[1])[0]
         winner_val = r[winner]
         # runner-up = second-highest value

@@ -82,12 +82,10 @@ class ModEffects:
     @property
     def alters_map(self) -> bool:
         """True if the effective difficulty vector differs from the base map's
-        rating. Currently gated on speed changes; HR tightens hit windows but
-        doesn't change what the map's structure looks like, and HD's reading
-        load isn't in the rating model yet — both stay 'base rating' until
-        those are modeled. Judgment still applies their windows via
-        `hit_window_mult` regardless."""
-        return self.speed_mult != 1.0
+        rating. Fires when the play changes what feature extraction sees
+        (speed_mult) OR what accuracy pressure the rating reflects
+        (hit_window_mult — DT, HR, EZ, HT, and their combos)."""
+        return self.speed_mult != 1.0 or self.hit_window_mult != 1.0
 
 
 def parse_mods(bitfield: int) -> ModEffects:

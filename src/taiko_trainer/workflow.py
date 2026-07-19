@@ -192,7 +192,7 @@ def _ingest_maps_from_memory(
         if bm.mode != 1:
             continue
         feats = extract_features(bm)
-        rating = rate_map(feats)
+        rating = rate_map(feats, od=bm.difficulty.overall_difficulty)
         upsert_map(catalog, bm, feats, rating, content)
         added += 1
     return added
@@ -237,7 +237,7 @@ def _ingest_sibling_maps(
         if bm.mode != 1:  # non-taiko
             continue
         features = extract_features(bm)
-        rating = rate_map(features)
+        rating = rate_map(features, od=bm.difficulty.overall_difficulty)
         upsert_map(catalog, bm, features, rating, content)
         added += 1
     catalog.close()
@@ -287,7 +287,7 @@ def add_replay(
 
     _report("rate_map", note="computing map features + rating")
     features = extract_features(bm)
-    rating = rate_map(features)
+    rating = rate_map(features, od=bm.difficulty.overall_difficulty)
 
     # Store the map in the catalog (blob + cached rating).
     plays = open_plays(workspace, player)  # this ATTACHes catalog
@@ -310,8 +310,16 @@ def add_replay(
     # this is a no-op — `apply_mods_to_beatmap` returns `bm` unchanged.
     mods = parse_mods(rp.meta.mods)
     play_bm = apply_mods_to_beatmap(bm, mods)
-    play_features = extract_features(play_bm) if mods.alters_map else features
-    play_rating = rate_map(play_features) if mods.alters_map else rating
+    # For mods that change what feature extraction sees (DT scales BPM/time),
+    # re-extract. For window-only mods (HR alone) the features are identical
+    # to base — reuse them. Rating gets `hit_window_mult` either way so
+    # accuracy-pressure boost applies to consistency + technical.
+    play_features = extract_features(play_bm) if mods.speed_mult != 1.0 else features
+    play_rating = (
+        rate_map(play_features, od=bm.difficulty.overall_difficulty, hit_window_mult=mods.hit_window_mult)
+        if mods.alters_map
+        else rating
+    )
 
     _report("judge", note=f"running per-note judgment ({mods.label})")
     judged = judge_replay(play_bm, rp, hit_window_mult=mods.hit_window_mult)
@@ -396,7 +404,7 @@ def add_map(workspace: str | Path, osu_path: str) -> AddResult:
         return AddResult(False, f"skipped: {p.name} is not a taiko map (mode={bm.mode})")
 
     features = extract_features(bm)
-    rating = rate_map(features)
+    rating = rate_map(features, od=bm.difficulty.overall_difficulty)
 
     catalog = open_catalog(workspace)
     upsert_map(catalog, bm, features, rating, content)
