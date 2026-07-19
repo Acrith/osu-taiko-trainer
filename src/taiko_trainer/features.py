@@ -785,34 +785,36 @@ class ReadingProfile:
     gimmick: gimmick captures chaotic/unpredictable SV, reading captures a
     consistent-but-fast baseline scroll that just needs faster reaction.
 
-    velocity_p95        95th-percentile scroll velocity across hittable notes
-                        (uses percentile so one weird SV spike doesn't dominate)
-    velocity_dense_p95  same, but restricted to notes inside dense stretches
-                        (top ~20% NPS windows) — a fast SV during a rest is
-                        not testing reading
-    high_scroll_share   fraction of hittable notes above 350 units (moderate-
-                        difficulty scroll baseline) — captures how much of
-                        the map lives at high scroll
-    peak_velocity       max scroll velocity in a dense window — the worst
-                        single reading spike
+    velocity_dense_p50  MEDIAN scroll velocity in dense stretches (top ~20%
+                        NPS windows) — the *sustained* scroll the player has
+                        to keep up with. Uniform-SV maps have p50=p95; heavy
+                        SV-variance maps have p50 well below p95, and it's
+                        the p50 that reflects reading load (the p95 spikes
+                        are gimmick moments, not reading pressure).
+    sustained_share     fraction of hittable notes where scroll velocity
+                        SUSTAINS above 280 for a ≥400ms window. A single
+                        note at SV=2.5 doesn't count, but a whole section
+                        at HR-level scroll does.
+    velocity_p95        overall 95th-percentile scroll velocity (unfiltered).
+                        Kept for reference / diagnostics, not scored.
     """
+    velocity_dense_p50: float
+    sustained_share: float
     velocity_p95: float
-    velocity_dense_p95: float
-    high_scroll_share: float
-    peak_velocity: float
 
 
 def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
     if not hittable:
-        return ReadingProfile(0.0, 0.0, 0.0, 0.0)
+        return ReadingProfile(0.0, 0.0, 0.0)
 
     # Per-note scroll velocity, clamped so SV=0 (invisible/gimmick) doesn't
     # zero out and drag the percentile down.
     velocities = [n.bpm * max(n.sv_multiplier, 0.25) for n in hittable]
-
-    # Local density around each note in a ±500ms window (same as gimmick_profile).
     times = [n.time_ms for n in hittable]
     n = len(times)
+
+    # Dense stretches: top ~20% by local NPS. A fast SV during a rest doesn't
+    # count as reading pressure — you have time to see it.
     window_ms = 500
     local_counts = [0] * n
     lo = 0
@@ -823,8 +825,8 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
         while hi < n and times[hi] <= times[i] + window_ms:
             hi += 1
         local_counts[i] = hi - lo
-    # Top ~20% local-density windows count as "dense" for reading purposes.
     density_threshold = sorted(local_counts)[int(0.8 * n)] if n else 0
+    dense_velocities = [v for v, d in zip(velocities, local_counts) if d >= density_threshold]
 
     def _pctile(vals: list[float], p: float) -> float:
         if not vals:
@@ -833,16 +835,33 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
         idx = min(len(s) - 1, int(p * len(s)))
         return s[idx]
 
-    dense_velocities = [v for v, d in zip(velocities, local_counts) if d >= density_threshold]
+    # Sustained-fast-scroll share: fraction of notes whose ±200ms neighborhood
+    # (~400ms sustained window) is ALSO above the 280 threshold. A lone SV=2.5
+    # gimmick note doesn't count — its neighbors are back at normal scroll.
+    # Only stretches where the scroll consistently holds above 280 fire this.
+    HIGH = 280
+    sustained_flag = [0] * n
+    for i in range(n):
+        t = times[i]
+        # Notes within ±200ms of this one.
+        j_lo = i
+        while j_lo > 0 and times[j_lo - 1] >= t - 200:
+            j_lo -= 1
+        j_hi = i
+        while j_hi + 1 < n and times[j_hi + 1] <= t + 200:
+            j_hi += 1
+        window = velocities[j_lo:j_hi + 1]
+        if not window:
+            continue
+        # Sustained = median of the 400ms neighborhood is above threshold.
+        window_sorted = sorted(window)
+        if window_sorted[len(window_sorted) // 2] > HIGH:
+            sustained_flag[i] = 1
 
     return ReadingProfile(
+        velocity_dense_p50=_pctile(dense_velocities, 0.50) if dense_velocities else 0.0,
+        sustained_share=sum(sustained_flag) / n,
         velocity_p95=_pctile(velocities, 0.95),
-        velocity_dense_p95=_pctile(dense_velocities, 0.95) if dense_velocities else 0.0,
-        # 280 units = ~200 BPM at SV 1.4 (or 230 BPM at HR standard SV). This
-        # is where a KDDK-level player starts feeling "notes smidge across the
-        # screen" — anything above counts as fast scroll for share purposes.
-        high_scroll_share=sum(1 for v in velocities if v > 280) / n,
-        peak_velocity=max(dense_velocities) if dense_velocities else max(velocities),
     )
 
 

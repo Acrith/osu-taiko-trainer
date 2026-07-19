@@ -261,27 +261,42 @@ def _raw_reading(f: MapFeatures) -> float:
     consistent SV=2.5 map at high BPM is 0 gimmick but heavy reading —
     the scroll just rushes at you and reaction time is the bottleneck.
 
+    The metric now uses the MEDIAN scroll velocity in dense sections
+    (velocity_dense_p50), not the 95th percentile. The 95th percentile
+    was picking up SV-spike sections that are gimmick moments, not
+    sustained reading pressure. And `sustained_share` requires the
+    ±200ms neighborhood to also be fast — a lone SV=2.5 spike in an
+    otherwise moderate-scroll map doesn't inflate the number.
+
     Anchors calibrated to the "notes smidge across the screen" band:
 
         <180  no meaningful reading load (Kantan / low-BPM Futsuu)
         180   normalization floor — where scroll starts feeling brisk
         280   "starts feeling fast" (200 BPM HR, or 230 BPM standard-SV)
-        420   dense_p95 saturation — semifinals-tier reading (230 HR, 265+ NM)
-        550   peak saturation — extreme scroll (HRDT bands, rate-boosted
-              280+ BPM maps)
+        380   dense_p50 saturation — semifinals-tier reading (230 HR uniform,
+              260+ BPM NM). Above this reading dominates every other skill.
 
     Reference points a top KDDK player validated:
-        The Fool [Stamina Thief] NM  → dense_p95 ~230 → very low reading
-        The Fool [Stamina Thief] HR  → dense_p95 ~322 → semifinals-tier hard
-        The Fool [Stamina Thief] HRDT→ dense_p95 ~483 → extreme
+        The Fool [Stamina Thief]    NM   dense_p50 ~230 → low  (stamina map)
+                                    HR   dense_p50 ~322 → semifinals-tier hard
+                                    HRDT dense_p50 ~483 → extreme
+        empty world [Emptiness]     HR   dense_p50 ~305 → moderate-hard
+                                         (SV spikes go higher but are gimmick,
+                                          not sustained reading)
     """
-    dense_p95_n = _norm_up(f.reading.velocity_dense_p95, 180, 420)
-    peak_n      = _norm_up(f.reading.peak_velocity, 240, 550)
-    share_n     = _norm(f.reading.high_scroll_share, 0.10, 0.65)
-    # Weighted: dense-p95 is the main signal (what does dense play LOOK like),
-    # peak is a smaller kicker (one hard section), share captures duration
-    # (does the reading load persist or is it a single spike?).
-    return 55 * dense_p95_n + 25 * peak_n + 20 * share_n
+    dense_p50_n = _norm_up(f.reading.velocity_dense_p50, 180, 380)
+    # Anchor 0.20 → 0.95 so the difference between "72% sustained" and "100%
+    # sustained" doesn't saturate — that's exactly the boundary between
+    # "SV-variable map at high BPM" and "uniform-scroll tournament map",
+    # and the metric has to preserve it.
+    share_n     = _norm(f.reading.sustained_share, 0.20, 0.95)
+    # Median = the scroll speed the player has to sustain in dense sections.
+    # Share = what fraction of the map keeps that pressure without letting up
+    # (visual breaks from low-SV sections reset the reading load — that's
+    # exactly what makes The Fool feel harder than empty world at HR even
+    # when medians are similar).
+    # Both signals carry near-equal weight because both matter.
+    return 55 * dense_p50_n + 45 * share_n
 
 
 def _od_pressure(od: float, hit_window_mult: float = 1.0) -> float:
