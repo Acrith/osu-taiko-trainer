@@ -32,6 +32,7 @@ from .db import (
 )
 from .features import extract_features
 from .judgment import judge_replay
+from .mods import apply_mods_to_beatmap, parse_mods
 from .osr_parser import parse_osr_file
 from .osu_parser import parse_osu_file
 from .player import ReplayPerformance, compute_player_skill
@@ -153,13 +154,21 @@ def refresh_ratings(workspace: str) -> None:
                     rp = parse_osr_file(tmp_path)
                 finally:
                     Path(tmp_path).unlink(missing_ok=True)
-                feats = extract_features(bm)
-                judged = judge_replay(bm, rp)
-                classes = classify_failures(judged, bm, feats)
+                mods = parse_mods(rp.meta.mods)
+                play_bm = apply_mods_to_beatmap(bm, mods)
+                feats = extract_features(play_bm)
+                eff_rating = rate_map(feats) if mods.alters_map else None
+                judged = judge_replay(play_bm, rp, hit_window_mult=mods.hit_window_mult)
+                classes = classify_failures(judged, play_bm, feats)
                 summary = summarize_failures(classes)
-                miss_patterns = extract_miss_patterns(classes, bm.hittable())
+                miss_patterns = extract_miss_patterns(classes, play_bm.hittable())
                 cheese = detect_cheese(judged)
-                update_replay_judgment(conn, r["id"], judged, summary, cheese, miss_patterns)
+                update_replay_judgment(
+                    conn, r["id"], judged, summary, cheese, miss_patterns,
+                    mods_bitfield=mods.bitfield,
+                    mods_label=mods.label,
+                    effective_rating=eff_rating,
+                )
                 rejudged += 1
             except Exception as e:
                 print(f"  {player}: rejudge SKIP replay #{r['id']}: {e}")

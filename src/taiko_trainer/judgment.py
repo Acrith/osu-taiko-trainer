@@ -60,17 +60,21 @@ class JudgmentWindows:
     miss: float
 
     @classmethod
-    def from_od(cls, od: float) -> "JudgmentWindows":
+    def from_od(cls, od: float, hit_window_mult: float = 1.0) -> "JudgmentWindows":
         # Anchors from ppy/osu TaikoHitWindows.cs at OD 0 / 5 / 10.
         # osu!stable truncates the interpolated windows to integers before
         # comparison, so a delta of exactly N ms with window 30.5 counts as OK
         # (game floors to 30, then |Δ| < 30 → OK). Match that behavior by
         # flooring the windows here rather than in every callsite.
+        #
+        # `hit_window_mult` scales the tolerance for speed-mods (DT = 1/1.5)
+        # and difficulty-mods (HR = 1/1.4). Composes multiplicatively for
+        # combos (HDDT = 1/1.5; HRDT = 1/(1.5*1.4)).
         import math
         return cls(
-            great=math.floor(_od_lerp(od, 50.0, 35.0, 20.0)),
-            ok=math.floor(_od_lerp(od, 120.0, 80.0, 50.0)),
-            miss=math.floor(_od_lerp(od, 135.0, 95.0, 70.0)),
+            great=math.floor(_od_lerp(od, 50.0, 35.0, 20.0) * hit_window_mult),
+            ok=math.floor(_od_lerp(od, 120.0, 80.0, 50.0) * hit_window_mult),
+            miss=math.floor(_od_lerp(od, 135.0, 95.0, 70.0) * hit_window_mult),
         )
 
 
@@ -100,9 +104,22 @@ class JudgedReplay:
         return (self.count_great + 0.5 * self.count_ok) / total
 
 
-def judge_replay(beatmap: TaikoBeatmap, replay: TaikoReplay) -> JudgedReplay:
-    """Pair map notes with replay key-downs and classify each note."""
-    windows = JudgmentWindows.from_od(beatmap.difficulty.overall_difficulty)
+def judge_replay(
+    beatmap: TaikoBeatmap,
+    replay: TaikoReplay,
+    hit_window_mult: float = 1.0,
+) -> JudgedReplay:
+    """Pair map notes with replay key-downs and classify each note.
+
+    `hit_window_mult` scales the OD-derived hit windows for mods that
+    tighten (DT, HR) or loosen (EZ, HT) tolerance. Callers typically pass
+    the value from `parse_mods(replay.meta.mods).hit_window_mult`. The
+    beatmap passed in should already be mod-scaled (via `apply_mods_to_beatmap`)
+    so note times line up with the replay's wall-clock event times."""
+    windows = JudgmentWindows.from_od(
+        beatmap.difficulty.overall_difficulty,
+        hit_window_mult=hit_window_mult,
+    )
     hittable = beatmap.hittable()
     events = replay.key_down_events()  # tuple of (time_ms, single-key TaikoInput)
 

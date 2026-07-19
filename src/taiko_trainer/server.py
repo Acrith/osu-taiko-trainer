@@ -832,6 +832,10 @@ th.links-col { text-align: right; }
 .fc-badge.ss { background: linear-gradient(90deg, #d4af37, #f1d475); color: #3a2a00; }
 h1 .fc-badge { font-size: 13px; padding: 3px 10px; }
 
+/* --- mods chip: DT, HDDT, HR, etc. Amber/gold to signal 'harder than base'. --- */
+.mods-chip { display: inline-block; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; padding: 2px 7px; border-radius: 3px; vertical-align: middle; margin-left: 6px; font-weight: 700; background: linear-gradient(90deg, #d4a02c, #f0c665); color: #2a1a00; text-shadow: 0 1px 0 rgba(255,255,255,0.3); }
+.mods-chip-lg { font-size: 12px; padding: 4px 11px; letter-spacing: 0.16em; }
+
 /* --- inspector (fits container; range scrubber pans/zooms) --- */
 .inspector-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
 .inspector-legend { display: flex; gap: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); align-items: center; }
@@ -1276,6 +1280,7 @@ def _render_map_hero(row: dict, player: str) -> str:
       <div class="hero-left">
         <div class="hero-pill-row">
           <span class="diff-pill">{row['map_version']}</span>
+          {_mods_chip(row.get('mods_label'), size='lg')}
           {combo_indicator}
         </div>
         <h1 class="hero-title">{row['map_title']}</h1>
@@ -1402,6 +1407,15 @@ def _fc_badge(misses: int, oks: int) -> str:
     if misses == 0:
         return '<span class="fc-badge fc">FC</span> '
     return ""
+
+
+def _mods_chip(label: str | None, *, size: str = "sm") -> str:
+    """Small mods chip appended after the map title / hero-diff pill.
+    Empty for NM plays so the common case doesn't get visual clutter."""
+    if not label or label == "NM":
+        return ""
+    css = "mods-chip" if size == "sm" else "mods-chip mods-chip-lg"
+    return f' <span class="{css}">{label}</span>'
 
 
 _CAUSE_COLORS = {
@@ -2359,7 +2373,7 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
             f'data-c-gimmick="{c_gimmick:.1f}" data-c-technical="{c_technical:.1f}" '
             f'data-c-consistency="{c_consistency:.1f}" '
             f'style="cursor:pointer">'
-            f'<td class="name">{badge}{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span></td>'
+            f'<td class="name">{badge}{title} <span style="color: var(--ink-muted); font-size: 11px;">[{version}]</span>{_mods_chip(r.get("mods_label"))}</td>'
             f'<td class="muted">{played}</td>'
             f'<td>{acc:.2f}%</td>'
             f'{miss_cell}'

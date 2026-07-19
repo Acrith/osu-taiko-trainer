@@ -109,6 +109,15 @@ CREATE TABLE IF NOT EXISTS replays (
     fast_cheese_pairs     INTEGER,
     classification_json   TEXT,
     miss_patterns_json    TEXT,
+    -- Mods this replay was actually played with. NM plays leave these null / 0 / 'NM'
+    -- and effective ratings equal the base map's rating (via coalesce at query time).
+    mods_bitfield         INTEGER DEFAULT 0,
+    mods_label            TEXT DEFAULT 'NM',
+    rating_speed_eff       REAL,
+    rating_stamina_eff     REAL,
+    rating_gimmick_eff     REAL,
+    rating_technical_eff   REAL,
+    rating_consistency_eff REAL,
     inserted_at           TEXT NOT NULL,
     UNIQUE(map_md5, played_at)
 );
@@ -219,8 +228,18 @@ def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
         if col not in existing:
             conn.execute(ddl)
     replays_existing = {r["name"] for r in conn.execute("PRAGMA table_info(replays)")}
-    if "miss_patterns_json" not in replays_existing:
-        conn.execute("ALTER TABLE replays ADD COLUMN miss_patterns_json TEXT")
+    for col, ddl in (
+        ("miss_patterns_json",     "ALTER TABLE replays ADD COLUMN miss_patterns_json TEXT"),
+        ("mods_bitfield",          "ALTER TABLE replays ADD COLUMN mods_bitfield INTEGER DEFAULT 0"),
+        ("mods_label",             "ALTER TABLE replays ADD COLUMN mods_label TEXT DEFAULT 'NM'"),
+        ("rating_speed_eff",       "ALTER TABLE replays ADD COLUMN rating_speed_eff REAL"),
+        ("rating_stamina_eff",     "ALTER TABLE replays ADD COLUMN rating_stamina_eff REAL"),
+        ("rating_gimmick_eff",     "ALTER TABLE replays ADD COLUMN rating_gimmick_eff REAL"),
+        ("rating_technical_eff",   "ALTER TABLE replays ADD COLUMN rating_technical_eff REAL"),
+        ("rating_consistency_eff", "ALTER TABLE replays ADD COLUMN rating_consistency_eff REAL"),
+    ):
+        if col not in replays_existing:
+            conn.execute(ddl)
     conn.commit()
 
 
@@ -455,8 +474,16 @@ def update_replay_judgment(
     classification: FailureSummary | None,
     cheese: CheeseReport | None,
     miss_patterns: list[dict] | None = None,
+    mods_bitfield: int = 0,
+    mods_label: str = "NM",
+    effective_rating: DimensionRating | None = None,
 ) -> None:
-    """Overwrite the judged fields on an existing replay row (rejudge)."""
+    """Overwrite the judged fields on an existing replay row (rejudge).
+
+    `mods_*` capture what the replay was played with; `effective_rating` is
+    the mod-adjusted DimensionRating (differs from the base map rating for
+    DT/HR/etc). Passing NM + None leaves eff-rating columns null so
+    downstream COALESCE queries fall back to the base map rating."""
     deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
     if deltas:
         mean = sum(deltas) / len(deltas)
@@ -468,6 +495,7 @@ def update_replay_judgment(
     miss_patterns_json = json.dumps(miss_patterns) if miss_patterns else None
     cheese_rate = cheese.cheese_rate if cheese else None
     fast_cheese = cheese.fast_cheese_pairs if cheese else None
+    er = effective_rating
     conn.execute(
         """
         UPDATE replays SET
@@ -476,7 +504,11 @@ def update_replay_judgment(
             delta_mean_ms = ?, delta_stddev_ms = ?,
             cheese_rate = ?, fast_cheese_pairs = ?,
             classification_json = ?,
-            miss_patterns_json = ?
+            miss_patterns_json = ?,
+            mods_bitfield = ?, mods_label = ?,
+            rating_speed_eff = ?, rating_stamina_eff = ?,
+            rating_gimmick_eff = ?, rating_technical_eff = ?,
+            rating_consistency_eff = ?
         WHERE id = ?
         """,
         (
@@ -486,6 +518,12 @@ def update_replay_judgment(
             cheese_rate, fast_cheese,
             classification_json,
             miss_patterns_json,
+            int(mods_bitfield), mods_label,
+            er.speed if er else None,
+            er.stamina if er else None,
+            er.gimmick if er else None,
+            er.technical if er else None,
+            er.consistency if er else None,
             replay_id,
         ),
     )
@@ -502,6 +540,9 @@ def insert_replay(
     cheese: CheeseReport | None = None,
     deltas: list[int] | None = None,
     miss_patterns: list[dict] | None = None,
+    mods_bitfield: int = 0,
+    mods_label: str = "NM",
+    effective_rating: DimensionRating | None = None,
 ) -> int:
     if deltas is None:
         deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
@@ -519,6 +560,7 @@ def insert_replay(
     miss_patterns_json = json.dumps(miss_patterns) if miss_patterns else None
     cheese_rate = cheese.cheese_rate if cheese else None
     fast_cheese = cheese.fast_cheese_pairs if cheese else None
+    er = effective_rating
 
     cursor = conn.execute(
         """
@@ -530,8 +572,11 @@ def insert_replay(
             cheese_rate, fast_cheese_pairs,
             classification_json,
             miss_patterns_json,
+            mods_bitfield, mods_label,
+            rating_speed_eff, rating_stamina_eff,
+            rating_gimmick_eff, rating_technical_eff, rating_consistency_eff,
             inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             map_md5, replay_content,
@@ -543,6 +588,12 @@ def insert_replay(
             cheese_rate, fast_cheese,
             classification_json,
             miss_patterns_json,
+            int(mods_bitfield), mods_label,
+            er.speed if er else None,
+            er.stamina if er else None,
+            er.gimmick if er else None,
+            er.technical if er else None,
+            er.consistency if er else None,
             _now(),
         ),
     )
@@ -565,10 +616,23 @@ def get_replays(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                r.delta_mean_ms, r.delta_stddev_ms,
                r.cheese_rate, r.fast_cheese_pairs,
                r.classification_json, r.miss_patterns_json, r.inserted_at,
+               r.mods_bitfield, r.mods_label,
                m.title AS map_title, m.version AS map_version, m.creator AS map_creator,
                m.beatmap_id, m.beatmapset_id,
-               m.rating_speed, m.rating_stamina, m.rating_gimmick,
-               m.rating_technical, m.rating_consistency
+               -- Base map ratings (NM), preserved for display of the underlying map difficulty.
+               m.rating_speed AS rating_speed_base,
+               m.rating_stamina AS rating_stamina_base,
+               m.rating_gimmick AS rating_gimmick_base,
+               m.rating_technical AS rating_technical_base,
+               m.rating_consistency AS rating_consistency_base,
+               -- Effective ratings: mod-adjusted for DT/HR/etc, fall back to base for NM
+               -- (or old records without eff columns populated). Everything downstream
+               -- that used to read rating_* keeps working transparently.
+               COALESCE(r.rating_speed_eff,       m.rating_speed)       AS rating_speed,
+               COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
+               COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
+               COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
+               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency
         FROM replays r
         LEFT JOIN catalog.maps m ON m.md5 = r.map_md5
         ORDER BY r.played_at DESC
@@ -697,8 +761,11 @@ def rebuild_snapshots(conn: sqlite3.Connection, compute_skill_fn) -> int:
         """
         SELECT r.accuracy_judged, r.count_miss, r.played_at,
                m.title, m.version,
-               m.rating_speed, m.rating_stamina, m.rating_gimmick,
-               m.rating_technical, m.rating_consistency
+               COALESCE(r.rating_speed_eff,       m.rating_speed)       AS rating_speed,
+               COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
+               COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
+               COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
+               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency
         FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
         ORDER BY r.played_at ASC
         """

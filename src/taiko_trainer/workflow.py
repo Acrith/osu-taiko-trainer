@@ -33,6 +33,7 @@ from .db import (
 )
 from .features import extract_features
 from .judgment import judge_replay
+from .mods import apply_mods_to_beatmap, parse_mods
 from .models import TaikoBeatmap
 from .osr_parser import parse_osr_file
 from .osu_parser import parse_osu_file
@@ -304,12 +305,20 @@ def add_replay(
 
     plays = open_plays(workspace, player)  # reopen for the rest of the pipeline
 
-    _report("judge", note="running per-note judgment")
-    judged = judge_replay(bm, rp)
+    # Apply any active mods (DT/HR/HD/etc) BEFORE judgment + rating so the
+    # play is scored against what the player actually experienced. For NM
+    # this is a no-op — `apply_mods_to_beatmap` returns `bm` unchanged.
+    mods = parse_mods(rp.meta.mods)
+    play_bm = apply_mods_to_beatmap(bm, mods)
+    play_features = extract_features(play_bm) if mods.alters_map else features
+    play_rating = rate_map(play_features) if mods.alters_map else rating
+
+    _report("judge", note=f"running per-note judgment ({mods.label})")
+    judged = judge_replay(play_bm, rp, hit_window_mult=mods.hit_window_mult)
     _report("classify", note=f"classifying {judged.count_miss} misses")
-    classifications = classify_failures(judged, bm, features)
+    classifications = classify_failures(judged, play_bm, play_features)
     summary = summarize_failures(classifications)
-    miss_patterns = extract_miss_patterns(classifications, bm.hittable())
+    miss_patterns = extract_miss_patterns(classifications, play_bm.hittable())
     cheese = detect_cheese(judged)
 
     _report("store", note="writing to database")
@@ -318,15 +327,24 @@ def add_replay(
         classification=summary,
         cheese=cheese,
         miss_patterns=miss_patterns,
+        mods_bitfield=mods.bitfield,
+        mods_label=mods.label,
+        effective_rating=play_rating if mods.alters_map else None,
     )
 
-    # Recompute the player's snapshot including the new replay.
+    # Recompute the player's snapshot including the new replay. Use the
+    # effective (mod-adjusted) rating so DT plays weigh at the difficulty
+    # the player actually cleared — a 99% on DT should count more than a
+    # 99% on NM of the same map.
     prows = plays.execute(
         """
         SELECT r.accuracy_judged, r.count_miss,
                m.title, m.version,
-               m.rating_speed, m.rating_stamina, m.rating_gimmick,
-               m.rating_technical, m.rating_consistency
+               COALESCE(r.rating_speed_eff,       m.rating_speed)       AS rating_speed,
+               COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
+               COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
+               COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
+               COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency
         FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
         """
     ).fetchall()
