@@ -231,25 +231,69 @@ def _run_len_band(n: int) -> str:
     return "8+"
 
 
+_HARD_DIVS = {"1/3", "1/6", "1/8", "1/12"}
+
+
 def _pattern_signature(cause: str, m: dict) -> str:
-    """Concrete pattern signature: the actual 5-note color shape around the
-    miss (with the missed note lowercased), plus rhythmic context and BPM
-    band. Two misses share a signature only when they were the same shape at
-    the same tempo — so a cluster tells you *exactly* what to drill."""
+    """Diagnostic-first signature: picks the STRONGEST structural signal at
+    the miss and names it. Clusters end up pointing at causes ("chunk-5
+    breaks parity", "tempo shift +40 BPM", "deep in 60-note stream") not
+    coincidental color-window correlations.
+
+    Priority order matters — a miss inside a 1/6-into-1/4 boundary should
+    surface as a divisor break, not as whichever chunk sequence happened
+    to be around it."""
+    bpm_b = _bpm_band(m.get("bpm", 0))
+
+    # 1. TEMPO SHIFT — BPM changed materially in the 500ms before the miss.
+    #    Rare + high-signal: player was mid-adaptation.
+    dbpm = m.get("bpm_delta_500ms") or 0
+    if dbpm >= 25:
+        return f"tempo shift · Δ{int(dbpm)} BPM · {bpm_b}"
+
+    # 2. DIVISOR BREAK — 1/4 ↔ 1/6 (or other hard divisor) transition right
+    #    at the miss. This is the rhythmic-read failure mode.
+    prev_div = m.get("prev_div")
+    next_div = m.get("next_div")
+    if prev_div and next_div and prev_div != next_div:
+        if prev_div in _HARD_DIVS or next_div in _HARD_DIVS:
+            return f"divisor break · {prev_div}→{next_div} · {bpm_b}"
+
+    # 3. PARITY BREAK — KDDK players flip alternation parity when they hit
+    #    odd-length mono chunks (3, 5, 7). If the last 3 chunks contained one,
+    #    that's the structural cause.
+    chunks = m.get("chunks_before") or []
+    odd = [c for c in chunks if c > 1 and c % 2 == 1]
+    if odd:
+        chunk_str = "+".join(str(c) for c in chunks)
+        return f"chunk parity · {chunk_str} · {bpm_b}"
+
+    # 4. MONO RUN — long same-color run itself is the load (finger fatigue).
+    ch_len = m.get("run_len", 0)
+    ch_pos = m.get("run_pos", 0)
+    if ch_len >= 4:
+        color = m.get("color", "?")
+        # Report position too — early miss vs late miss in the run is different.
+        pos_lbl = "start" if ch_pos <= 1 else ("end" if ch_pos >= ch_len - 2 else "mid")
+        return f"mono-{color} run len-{ch_len} [{pos_lbl}] · {bpm_b}"
+
+    # 5. STREAM DEPTH — deep into a long dense stream = stamina/attention.
+    s_pos = m.get("stream_pos", 0)
+    s_len = m.get("stream_len", 0)
+    if s_len >= 40 and s_pos >= 20:
+        # Bucket the depth so clusters aggregate.
+        depth_band = "20-40" if s_pos < 40 else ("40-60" if s_pos < 60 else "60+")
+        len_band = "40-60" if s_len < 60 else ("60-100" if s_len < 100 else "100+")
+        return f"stream depth · note {depth_band} of {len_band} · {bpm_b}"
+
+    # 6. FALLBACK — no strong structural signal. Keep the color window as
+    #    a "unclustered" bucket; if this fills up we know a cause is escaping
+    #    the diagnostic set above.
     ctx = m.get("color_ctx") or ""
     rhythm = m.get("rhythm_ctx") or "?"
-    bpm_b = _bpm_band(m.get("bpm", 0))
-    if not ctx:
-        # Backfill for pre-schema records.
-        rl = _run_len_band(m.get("run_len", 0))
-        return f"length-{rl} at {bpm_b} BPM"
-    base = f"{ctx} · {rhythm} · {bpm_b} BPM"
-    # Cause-specific tail. Kept short so clusters aggregate.
-    if cause == "stamina":
-        return f"{base} · late-map"
-    if cause == "gimmick":
-        return f"{base} · SV shift"
-    return base
+    if ctx:
+        return f"no signal · {ctx} · {rhythm} · {bpm_b}"
+    return f"no signal · {bpm_b}"
 
 
 def _compute_weakness_clusters(replays: list[dict], top_n: int = 8) -> tuple:
@@ -288,8 +332,16 @@ def _compute_weakness_clusters(replays: list[dict], top_n: int = 8) -> tuple:
             map_key = (r.get("map_title") or "?", r.get("map_version") or "?", int(r["id"]))
             slot["maps"][map_key] = slot["maps"].get(map_key, 0) + 1
 
-    # Sort by miss count desc; return top-N.
-    ordered = sorted(clusters.items(), key=lambda kv: -kv[1]["count"])[:top_n]
+    # Noise floor: a cluster must have at least MIN_HITS misses OR span at
+    # least 2 different maps. Single-map 2-miss clusters are almost always
+    # coincidence and drown out the real weaknesses.
+    MIN_HITS = 4
+    MIN_MAPS = 2
+    surviving = [
+        (k, d) for k, d in clusters.items()
+        if d["count"] >= MIN_HITS or len(d["maps"]) >= MIN_MAPS
+    ]
+    ordered = sorted(surviving, key=lambda kv: -kv[1]["count"])[:top_n]
     return tuple(
         WeaknessCluster(
             cause=cause,

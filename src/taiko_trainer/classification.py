@@ -322,6 +322,52 @@ def extract_miss_patterns(
         distinct.sort(key=lambda d: -divs.count(d))
         return f"mixed {distinct[0]}+{distinct[1]}" if len(distinct) >= 2 else f"pure {distinct[0]}"
 
+    def _chunks_before(idx: int, k: int = 3) -> list[int]:
+        """Lengths of the k mono-color chunks ending at or before idx (chronological).
+        For KDDK players, odd-length chunks (3, 5, 7) flip the strict alternation
+        parity — that's the structural cost the memory calls chunk-misalignment."""
+        result: list[int] = []
+        cur = idx
+        while len(result) < k and cur >= 0:
+            length = run_len[cur]
+            if length > 0:
+                result.append(length)
+            cur = cur - run_pos[cur] - 1
+        return list(reversed(result))
+
+    # Continuous streams: sequences of notes with 1/4-or-tighter gaps at local BPM.
+    # (Density in-stream is what makes stamina & attention drop, not any per-note
+    # signal.)
+    stream_id = [0] * len(hittable)
+    stream_pos_arr = [0] * len(hittable)
+    cur_id = 0
+    cur_start = 0
+    for i in range(len(hittable)):
+        stream_id[i] = cur_id
+        stream_pos_arr[i] = i - cur_start
+        if i < len(hittable) - 1:
+            gap_ms = hittable[i + 1].time_ms - hittable[i].time_ms
+            bpm = hittable[i].bpm or 100.0
+            quarter_ms = 15000.0 / bpm   # 60000 / bpm / 4
+            if gap_ms > quarter_ms * 1.4:
+                cur_id += 1
+                cur_start = i + 1
+    stream_len_arr = [0] * len(hittable)
+    counts: dict[int, int] = {}
+    for sid in stream_id:
+        counts[sid] = counts.get(sid, 0) + 1
+    for i in range(len(hittable)):
+        stream_len_arr[i] = counts[stream_id[i]]
+
+    def _bpm_delta(idx: int, window_ms: float = 500.0) -> float:
+        """Absolute BPM change over the last `window_ms` — nonzero means a
+        tempo shift happened right before the miss."""
+        t = hittable[idx].time_ms
+        for j in range(idx - 1, -1, -1):
+            if t - hittable[j].time_ms > window_ms:
+                return abs((hittable[idx].bpm or 0) - (hittable[j].bpm or 0))
+        return 0.0
+
     records: list[dict] = []
     for cls in classifications:
         if cls.judgment.verdict is not Verdict.MISS:
@@ -342,8 +388,14 @@ def extract_miss_patterns(
             "next_div": next_div,
             "run_len": run_len[idx],
             "run_pos": run_pos[idx],
-            "color_ctx": _color_ctx(idx),      # e.g. "KDdKD" — lowercase = the miss
-            "rhythm_ctx": _rhythm_ctx(idx),    # e.g. "pure 1/6" or "mixed 1/4+1/6"
+            "color_ctx": _color_ctx(idx),
+            "rhythm_ctx": _rhythm_ctx(idx),
+            # Structural context — the fields that reveal the actual cause,
+            # not just the local color-shape correlation.
+            "chunks_before": _chunks_before(idx, 3),
+            "stream_pos": stream_pos_arr[idx],
+            "stream_len": stream_len_arr[idx],
+            "bpm_delta_500ms": round(_bpm_delta(idx), 1),
         })
     return records
 

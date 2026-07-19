@@ -898,27 +898,31 @@ _STYLE_BADGE = {
     "unknown": ("STYLE?", "playstyle not set"),
 }
 
+import re as _re
+
+_COLOR_TOKEN_RE = _re.compile(r"(?<![A-Za-z])[KkDd·]{3,}(?![A-Za-z])")
+
+
 def _colorize_signature(sig: str) -> str:
-    """The signature leads with a 5-char color context like 'KDdKD' (lowercase
-    marks the missed note). Colorize K=blue, D=red — the standard taiko color
-    coding — and mark the missed letter with underline+brightness."""
-    # Only touch the leading pattern token (up to first space or ' ·').
+    """The new diagnostic signatures may lead with English labels ('tempo
+    shift', 'chunk parity', 'divisor break', 'no signal'). Only colorize
+    K/D letters that appear as a standalone taiko-color TOKEN — a run of 3+
+    K/D/k/d/· characters not adjacent to letters. Everything else stays as
+    plain text so we don't rainbow the whole line."""
     if not sig:
         return ""
-    head, sep, tail = sig.partition(" ·")
-    tokens: list[str] = []
-    for ch in head:
-        if ch in "K":
-            tokens.append(f'<span class="wp-K">K</span>')
-        elif ch in "D":
-            tokens.append(f'<span class="wp-D">D</span>')
-        elif ch == "k":
-            tokens.append(f'<span class="wp-K wp-miss">k</span>')
-        elif ch == "d":
-            tokens.append(f'<span class="wp-D wp-miss">d</span>')
-        else:
-            tokens.append(ch)
-    return "".join(tokens) + sep + tail
+
+    def _repl(match: _re.Match) -> str:
+        buf = []
+        for ch in match.group(0):
+            if ch == "K": buf.append('<span class="wp-K">K</span>')
+            elif ch == "D": buf.append('<span class="wp-D">D</span>')
+            elif ch == "k": buf.append('<span class="wp-K wp-miss">k</span>')
+            elif ch == "d": buf.append('<span class="wp-D wp-miss">d</span>')
+            else: buf.append(ch)
+        return "".join(buf)
+
+    return _COLOR_TOKEN_RE.sub(_repl, sig)
 
 
 def _render_weakness_patterns(report, player: str) -> str:
