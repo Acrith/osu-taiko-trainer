@@ -552,6 +552,22 @@ def link_player_to_user(conn: sqlite3.Connection, player_name: str, user_id: int
     conn.commit()
 
 
+def _replay_count(workspace: str | Path, player_name: str) -> int:
+    """Count replay rows in a per-player .db without triggering the full
+    open_plays init/attach. Used to detect empty stub DBs during first-login
+    repair. Returns 0 if the file doesn't exist or has no replays table."""
+    p = player_db_path(workspace, player_name)
+    if not p.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(str(p))
+        row = conn.execute("SELECT COUNT(*) FROM replays").fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
 def find_player_name_for_user(
     workspace: str | Path, user_id: int
 ) -> str | None:
@@ -597,6 +613,42 @@ def ensure_player_db_for_user(
     stable identifier for their history; the profile display fields track
     the current name."""
     existing = find_player_name_for_user(workspace, int(user["id"]))
+
+    # Repair a specific bug shape: on very early web-mode logins the code
+    # created `<name>-<id>.db` as a fresh empty file instead of adopting
+    # the pre-existing `<name>.db` from local mode. If we detect that
+    # pattern (linked file is empty AND an unlinked matching-name file
+    # exists), unlink the empty one and let the adoption path pick up the
+    # real data.
+    if existing is not None:
+        empty_linked = _replay_count(workspace, existing) == 0
+        target_name = user["osu_username"]
+        target_path = player_db_path(workspace, target_name)
+        if empty_linked and existing != target_name and target_path.exists():
+            unlinked = sqlite3.connect(str(target_path))
+            unlinked.row_factory = sqlite3.Row
+            try:
+                row = unlinked.execute(
+                    "SELECT user_id FROM player_info WHERE name = ? LIMIT 1", (target_name,)
+                ).fetchone()
+                target_unlinked = row is not None and row["user_id"] is None
+                if target_unlinked and _replay_count(workspace, target_name) > 0:
+                    # Clear the stale linkage on the empty file so it stops
+                    # winning the lookup, then fall through to the adoption
+                    # branch below. The empty .db file is left in place; user
+                    # can delete it themselves once they've confirmed the
+                    # correct data is showing.
+                    stale = open_plays(workspace, existing)
+                    stale.execute(
+                        "UPDATE player_info SET user_id = NULL WHERE name = ?",
+                        (existing,),
+                    )
+                    stale.commit()
+                    stale.close()
+                    existing = None  # re-enter the create/adopt branch below
+            finally:
+                unlinked.close()
+
     if existing is not None:
         # Refresh osu! display fields on the linked player_info row so
         # avatar / cover / rank stay current.
@@ -624,15 +676,37 @@ def ensure_player_db_for_user(
         conn.close()
         return existing
 
-    # Create a new per-player DB, keyed on the osu_username. If that filename
-    # is already taken by another user (extremely unlikely but possible from
-    # local-mode collisions), suffix with the users.id.
+    # Create a new per-player DB, keyed on the osu_username.
+    #
+    # If workspace/<osu_username>.db already exists, distinguish two cases:
+    #   1. It's UNLINKED (user_id NULL) — this is the common case for
+    #      someone who used the local single-user app before web mode
+    #      landed. Adopt it: their existing replay data becomes THIS
+    #      user's data. Same person, so this is what they want.
+    #   2. It's linked to a DIFFERENT user — collision (rare, e.g. two
+    #      people with osu! usernames that share a local-mode name).
+    #      Suffix with users.id to disambiguate.
     name = user["osu_username"]
     p = player_db_path(workspace, name)
     if p.exists():
-        name = f"{name}-{user['id']}"
+        try:
+            probe = sqlite3.connect(str(p))
+            probe.row_factory = sqlite3.Row
+            row = probe.execute(
+                "SELECT user_id FROM player_info WHERE name = ? LIMIT 1", (name,)
+            ).fetchone()
+            probe.close()
+        except sqlite3.OperationalError:
+            # Pre-migration DB (no user_id column). Adopting is safe —
+            # open_plays below will run the migration and add the column.
+            row = None
+        already_linked = row is not None and row["user_id"] is not None
+        if already_linked and int(row["user_id"]) != int(user["id"]):
+            # True collision: this file belongs to a different account. Suffix.
+            name = f"{name}-{user['id']}"
 
     conn = open_plays(workspace, name)  # creates the file + player_info row
+                                        # (or opens the existing one for adoption)
     conn.execute(
         """
         UPDATE player_info SET
