@@ -13,11 +13,13 @@ dependencies = [
     "python-multipart>=0.0.20",
     "httpx>=0.27",
     "itsdangerous>=2.2",   # signed session cookies (web mode)
+    "watchdog>=4.0",       # replay folder watcher (uploader companion)
 ]
 
 [project.scripts]
 taiko-trainer = "taiko_trainer:main"
 taiko-smoke = "taiko_trainer.smoke:main"
+taiko-uploader = "taiko_trainer.uploader:main"
 
 [build-system]
 requires = ["uv_build>=0.10.6,<0.11.0"]
