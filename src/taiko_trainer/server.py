@@ -552,7 +552,10 @@ form.inline-form button { font-family: var(--font-mono); font-size: 11px; letter
 .weakness-row { display: grid; grid-template-columns: 140px 1fr max-content; gap: 12px; align-items: center; padding: 10px 4px; border-bottom: 1px dashed var(--rule); font-family: var(--font-mono); }
 .weakness-row:last-child { border-bottom: none; }
 .weakness-cause { padding: 4px 10px; border-radius: 3px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink); text-align: center; }
-.weakness-sig { font-size: 13px; color: var(--ink); font-weight: 500; }
+.weakness-sig { font-size: 14px; color: var(--ink); font-weight: 500; letter-spacing: 0.02em; }
+.weakness-sig .wp-K { color: #4aa3d9; font-weight: 700; }
+.weakness-sig .wp-D { color: #e55a5a; font-weight: 700; }
+.weakness-sig .wp-miss { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; filter: brightness(1.3); }
 .weakness-maps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .weakness-map-chip { font-size: 10px; padding: 2px 8px; background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-muted); text-decoration: none; }
 .weakness-map-chip:hover { color: var(--accent); border-color: var(--accent-soft); }
@@ -895,6 +898,29 @@ _STYLE_BADGE = {
     "unknown": ("STYLE?", "playstyle not set"),
 }
 
+def _colorize_signature(sig: str) -> str:
+    """The signature leads with a 5-char color context like 'KDdKD' (lowercase
+    marks the missed note). Colorize K=blue, D=red — the standard taiko color
+    coding — and mark the missed letter with underline+brightness."""
+    # Only touch the leading pattern token (up to first space or ' ·').
+    if not sig:
+        return ""
+    head, sep, tail = sig.partition(" ·")
+    tokens: list[str] = []
+    for ch in head:
+        if ch in "K":
+            tokens.append(f'<span class="wp-K">K</span>')
+        elif ch in "D":
+            tokens.append(f'<span class="wp-D">D</span>')
+        elif ch == "k":
+            tokens.append(f'<span class="wp-K wp-miss">k</span>')
+        elif ch == "d":
+            tokens.append(f'<span class="wp-D wp-miss">d</span>')
+        else:
+            tokens.append(ch)
+    return "".join(tokens) + sep + tail
+
+
 def _render_weakness_patterns(report, player: str) -> str:
     """Cluster the misses across the player's BEST play of each map by pattern
     signature. Surfaces genuine weaknesses evidenced by consistent misses across
@@ -917,11 +943,12 @@ def _render_weakness_patterns(report, player: str) -> str:
             f'<a class="weakness-map-chip" href="/replay/{player}/{rid}">{title[:22]} <span class="muted">[{ver[:14]}]</span></a>'
             for (title, ver, rid) in c.maps
         )
+        sig_html = _colorize_signature(c.signature)
         rows_html += (
             f'<div class="weakness-row">'
             f'<div class="weakness-cause" style="background: {color}20; border-left: 3px solid {color};">{c.cause.replace("_", "-")}</div>'
             f'<div class="weakness-body">'
-            f'<div class="weakness-sig">{c.signature}</div>'
+            f'<div class="weakness-sig">{sig_html}</div>'
             f'<div class="weakness-maps">{map_chips}</div>'
             f'</div>'
             f'<div class="weakness-count">{c.miss_count}<span class="muted"> misses · {pct:.0f}%</span></div>'

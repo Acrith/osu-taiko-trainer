@@ -232,33 +232,24 @@ def _run_len_band(n: int) -> str:
 
 
 def _pattern_signature(cause: str, m: dict) -> str:
-    """Turn a per-miss record into a human-readable pattern signature. The
-    signature drives the group-by for weakness clustering — misses that share
-    a signature roll up into one cluster."""
+    """Concrete pattern signature: the actual 5-note color shape around the
+    miss (with the missed note lowercased), plus rhythmic context and BPM
+    band. Two misses share a signature only when they were the same shape at
+    the same tempo — so a cluster tells you *exactly* what to drill."""
+    ctx = m.get("color_ctx") or ""
+    rhythm = m.get("rhythm_ctx") or "?"
     bpm_b = _bpm_band(m.get("bpm", 0))
-    prev = m.get("prev_div") or "?"
-    nxt = m.get("next_div") or "?"
-    rl = _run_len_band(m.get("run_len", 0))
-    if cause == "technical":
-        # For technical: focus on hard divisor around the miss
-        hard = ""
-        if prev in ("1/6", "1/3", "1/8", "1/12"): hard = prev
-        elif nxt in ("1/6", "1/3", "1/8", "1/12"): hard = nxt
-        return f"{hard or 'mixed'} at {bpm_b} BPM" if hard else f"hard-divisor at {bpm_b} BPM"
-    if cause == "pattern_parity":
-        return f"length-{rl} run at {bpm_b} BPM"
-    if cause == "gimmick":
-        return f"SV shift at {bpm_b} BPM"
+    if not ctx:
+        # Backfill for pre-schema records.
+        rl = _run_len_band(m.get("run_len", 0))
+        return f"length-{rl} at {bpm_b} BPM"
+    base = f"{ctx} · {rhythm} · {bpm_b} BPM"
+    # Cause-specific tail. Kept short so clusters aggregate.
     if cause == "stamina":
-        return f"length-{rl} at {bpm_b} BPM (late-map)"
-    if cause == "speed":
-        return f"1/4 at {bpm_b} BPM"
-    if cause == "wrong_color":
-        c = m.get("color", "?")
-        return f"{c} on length-{rl} at {bpm_b} BPM"
-    if cause == "consistency":
-        return f"drift on 1/4 at {bpm_b} BPM"
-    return f"{bpm_b} BPM · {prev}→{nxt}"
+        return f"{base} · late-map"
+    if cause == "gimmick":
+        return f"{base} · SV shift"
+    return base
 
 
 def _compute_weakness_clusters(replays: list[dict], top_n: int = 8) -> tuple:

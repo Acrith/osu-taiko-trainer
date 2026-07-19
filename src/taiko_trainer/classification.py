@@ -288,6 +288,40 @@ def extract_miss_patterns(
             run_pos[idx] = k
         i = j + 1
 
+    def _color_ctx(idx: int, window: int = 2) -> str:
+        """5-note color pattern centered on idx. The missed note is marked
+        with a lowercase letter (k/d) so the exact position stands out from
+        the surrounding uppercase (K/D) context."""
+        parts: list[str] = []
+        for k in range(idx - window, idx + window + 1):
+            if k < 0 or k >= len(hittable):
+                parts.append("·")  # edge padding
+            else:
+                is_don = hittable[k].note_type.is_don
+                ch = "D" if is_don else "K"
+                if k == idx:
+                    ch = ch.lower()  # miss marker
+                parts.append(ch)
+        return "".join(parts)
+
+    def _rhythm_ctx(idx: int) -> str:
+        """Short label for the local divisor mix around the miss. Uses ±2
+        gap divisors: reports 'pure 1/6' if all match, 'mixed 1/4+1/6' if
+        the miss sits at a boundary."""
+        divs: list[str] = []
+        for gi in range(max(0, idx - 2), min(len(gap_divisors), idx + 2)):
+            d = gap_divisors[gi]
+            if d and d != "1/1" and d != "other":
+                divs.append(d)
+        if not divs:
+            return "sparse"
+        distinct = list({d for d in divs})
+        if len(distinct) == 1:
+            return f"pure {distinct[0]}"
+        # Two most common in the window
+        distinct.sort(key=lambda d: -divs.count(d))
+        return f"mixed {distinct[0]}+{distinct[1]}" if len(distinct) >= 2 else f"pure {distinct[0]}"
+
     records: list[dict] = []
     for cls in classifications:
         if cls.judgment.verdict is not Verdict.MISS:
@@ -308,6 +342,8 @@ def extract_miss_patterns(
             "next_div": next_div,
             "run_len": run_len[idx],
             "run_pos": run_pos[idx],
+            "color_ctx": _color_ctx(idx),      # e.g. "KDdKD" — lowercase = the miss
+            "rhythm_ctx": _rhythm_ctx(idx),    # e.g. "pure 1/6" or "mixed 1/4+1/6"
         })
     return records
 
