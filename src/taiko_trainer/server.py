@@ -255,6 +255,67 @@ def create_app(workspace: str) -> FastAPI:
             return resp
         return RedirectResponse(url=f"/u/{user['osu_username']}", status_code=302)
 
+    # --- Settings: API tokens for the uploader companion -----------------
+
+    @app.get("/settings/tokens", response_class=HTMLResponse)
+    def tokens_page(
+        request: Request,
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """List existing API tokens + a form to create new ones. Only the
+        newly-created raw token is displayed (once, via query param); after
+        page navigation it's gone forever, so users must save it before
+        leaving."""
+        if not auth_module.is_web_mode():
+            return HTMLResponse(_render_error("Token management is only available in web mode."), status_code=404)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        cat = open_catalog(workspace)
+        user = get_user_by_id(cat, uid)
+        if not user:
+            cat.close()
+            return RedirectResponse(url="/", status_code=302)
+        tokens = list_api_tokens(cat, uid)
+        cat.close()
+        # If the user just created a token, the raw value comes in via query
+        # param (?created=<raw>). We show it once and never persist it.
+        new_token = request.query_params.get("created", "")
+        return HTMLResponse(_render_tokens_page(user, tokens, new_token))
+
+    @app.post("/settings/tokens")
+    def create_token(
+        label: str = Form(...),
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        if not auth_module.is_web_mode():
+            raise HTTPException(status_code=404)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        cat = open_catalog(workspace)
+        raw = create_api_token(cat, uid, label)
+        cat.close()
+        # Query-param the raw token forward exactly once; the tokens page
+        # shows it in a copy box + reminder that it's the last time.
+        from urllib.parse import quote
+        return RedirectResponse(url=f"/settings/tokens?created={quote(raw)}", status_code=303)
+
+    @app.post("/settings/tokens/{token_id}/revoke")
+    def do_revoke(
+        token_id: int,
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        if not auth_module.is_web_mode():
+            raise HTTPException(status_code=404)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        cat = open_catalog(workspace)
+        revoke_api_token(cat, uid, token_id)
+        cat.close()
+        return RedirectResponse(url="/settings/tokens", status_code=303)
+
     # --- HTML pages ------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
@@ -874,6 +935,8 @@ header.site nav { flex: 1; }
 .auth-widget form { margin: 0; padding: 0; display: inline; }
 .auth-widget .logout-btn { background: none; border: 1px solid var(--rule); color: var(--ink-muted); padding: 4px 10px; border-radius: 3px; font-family: inherit; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; }
 .auth-widget .logout-btn:hover { border-color: var(--miss); color: var(--miss); }
+.auth-widget .settings-link { font-size: 16px; color: var(--ink-muted); text-decoration: none; margin: 0 2px; }
+.auth-widget .settings-link:hover { color: var(--ink); text-decoration: none; }
 .eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); }
 h1 { font-family: var(--font-mono); font-weight: 500; font-size: 32px; letter-spacing: -0.015em; margin: 4px 0 0 0; }
 h2 { font-family: var(--font-mono); font-weight: 500; font-size: 20px; margin: 0 0 8px 0; }
@@ -1959,6 +2022,7 @@ def _html_page(title: str, body: str, active: str = "") -> str:
     slot.innerHTML =
       (av ? '<img class="avatar" src="' + av + '" alt="">' : '') +
       '<a class="user" href="/u/' + encodeURIComponent(name) + '">' + name + '</a>' +
+      '<a class="settings-link" href="/settings/tokens" title="Settings">⚙</a>' +
       '<form method="post" action="/logout"><button type="submit" class="logout-btn">Logout</button></form>';
   }}).catch(() => {{}});
 }})();
@@ -3124,6 +3188,101 @@ def _render_features_panel(f) -> str:
       <div class="feat-row"><span class="k">overall p95 (unfiltered)</span><span class="v">{f.reading.velocity_p95:.0f}</span></div>
     </div>
   </section>"""
+
+
+def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
+    """Settings page for managing API tokens. Two states:
+
+    - Regular view: form to create a new token, list of existing tokens
+      with revoke buttons.
+    - Just-created view: shows the raw new token ONCE in a copy box with
+      a "this is your only chance to save it" warning. Query param
+      driven — reload/navigate away and it's gone.
+    """
+    new_token_html = ""
+    if new_raw:
+        new_token_html = f"""
+    <div class="new-token-banner">
+      <div class="new-token-label">New token created — copy it now, this is the only time it will be shown:</div>
+      <div class="new-token-box">
+        <code id="new-token-val">{new_raw}</code>
+        <button type="button" class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('new-token-val').textContent).then(() => this.textContent = 'Copied!')">Copy</button>
+      </div>
+      <p class="hint">
+        Save this in your uploader config file. If you lose it, revoke this token and create a new one — the raw value cannot be recovered from the server.
+      </p>
+    </div>
+"""
+    rows_html = ""
+    if not tokens:
+        rows_html = '<tr><td colspan="4" class="muted" style="text-align: center; padding: 20px;">no tokens yet</td></tr>'
+    else:
+        for t in tokens:
+            revoked = t["revoked_at"] is not None
+            last_used = t["last_used_at"][:16].replace("T", " ") if t["last_used_at"] else "never"
+            created = t["created_at"][:16].replace("T", " ")
+            status_cell = (
+                f'<td><span class="pill revoked">revoked</span></td>'
+                if revoked
+                else f'<td><form method="post" action="/settings/tokens/{t["id"]}/revoke" style="margin:0"><button type="submit" class="revoke-btn" onclick="return confirm(\'Revoke this token? Any uploader still using it will fail.\')">Revoke</button></form></td>'
+            )
+            rows_html += (
+                f'<tr class="{ "revoked-row" if revoked else "" }">'
+                f'<td><code class="token-prefix">{t["prefix"]}…</code></td>'
+                f'<td>{t["label"]}</td>'
+                f'<td class="muted">{created}</td>'
+                f'<td class="muted">{last_used}</td>'
+                f'{status_cell}'
+                f'</tr>'
+            )
+
+    body = f"""
+  <section class="eyebrow-row">
+    <span class="eyebrow"><a href="/u/{user['osu_username']}" style="color: var(--ink-muted);">← {user['osu_username']}</a>  ·  settings  ·  api tokens</span>
+  </section>
+
+  <section class="card">
+    <h2>API tokens</h2>
+    <p class="hint">
+      Tokens let the uploader companion post replays to your account without
+      opening a browser. Create one per machine so you can revoke individually
+      if a device is compromised or retired.
+    </p>
+    {new_token_html}
+    <form method="post" action="/settings/tokens" class="token-form">
+      <label>Label <input type="text" name="label" placeholder="e.g. Home PC" required maxlength="80"></label>
+      <button type="submit">Create token</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Existing tokens</h2>
+    <div style="overflow-x: auto;">
+      <table>
+        <thead><tr><th>prefix</th><th>label</th><th>created</th><th>last used</th><th>action</th></tr></thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <style>
+    .new-token-banner {{ background: var(--accent-faint); border: 1px solid var(--accent-soft); border-radius: 4px; padding: 16px; margin: 12px 0; }}
+    .new-token-label {{ font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); margin-bottom: 8px; }}
+    .new-token-box {{ display: flex; align-items: center; gap: 8px; background: var(--panel); padding: 8px 12px; border-radius: 3px; font-family: var(--font-mono); overflow-x: auto; }}
+    .new-token-box code {{ font-size: 13px; color: var(--ink); flex: 1; white-space: nowrap; overflow-x: auto; }}
+    .copy-btn {{ background: var(--accent); color: white; border: none; padding: 6px 14px; border-radius: 3px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; }}
+    .token-form {{ display: flex; align-items: center; gap: 12px; margin-top: 14px; }}
+    .token-form label {{ display: flex; align-items: center; gap: 8px; flex: 1; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted); }}
+    .token-form input {{ flex: 1; padding: 8px 12px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); border-radius: 3px; font-family: var(--font-mono); font-size: 13px; }}
+    .token-form button {{ padding: 8px 20px; border: 1px solid var(--accent); background: var(--accent); color: white; border-radius: 3px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; }}
+    .revoke-btn {{ background: none; border: 1px solid var(--rule); color: var(--ink-muted); padding: 4px 12px; border-radius: 3px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; }}
+    .revoke-btn:hover {{ border-color: var(--miss); color: var(--miss); }}
+    .revoked-row {{ opacity: 0.5; }}
+    .pill.revoked {{ font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; padding: 2px 8px; background: var(--rule); color: var(--ink-muted); border-radius: 3px; }}
+    .token-prefix {{ font-family: var(--font-mono); font-size: 12px; color: var(--ink); }}
+  </style>
+"""
+    return _html_page(f"tokens — {user['osu_username']}", body)
 
 
 def _render_error(message: str) -> str:
