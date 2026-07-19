@@ -188,11 +188,31 @@ class State:
         )
         self.conn.commit()
 
-    def recent(self, limit: int = 10) -> list[dict]:
+    def recent(self, limit: int = 10, include_skipped: bool = False) -> list[dict]:
+        """Most-recent state rows. By default excludes skipped-historic
+        entries (map_title='SKIPPED_HISTORIC') which are just first-run
+        snapshot noise, not actual uploads."""
+        where = "" if include_skipped else "WHERE COALESCE(map_title,'') != 'SKIPPED_HISTORIC'"
         rows = self.conn.execute(
-            "SELECT * FROM uploaded ORDER BY uploaded_at DESC LIMIT ?", (limit,)
+            f"SELECT * FROM uploaded {where} ORDER BY uploaded_at DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def stats(self) -> dict:
+        """Aggregate counts for the status command."""
+        total = self.conn.execute("SELECT COUNT(*) FROM uploaded").fetchone()[0]
+        skipped_historic = self.conn.execute(
+            "SELECT COUNT(*) FROM uploaded WHERE map_title = 'SKIPPED_HISTORIC'"
+        ).fetchone()[0]
+        uploaded = self.conn.execute(
+            "SELECT COUNT(*) FROM uploaded WHERE replay_id IS NOT NULL"
+        ).fetchone()[0]
+        return {
+            "total": int(total),
+            "uploaded": int(uploaded),
+            "skipped_historic": int(skipped_historic),
+        }
 
 
 def _hash_head(path: Path, n: int = 512) -> str:
@@ -456,45 +476,56 @@ def cmd_init() -> int:
 def cmd_run() -> int:
     """Start the watcher loop.
 
-    Does NOT auto-import your entire history on startup — that would be
-    thousands of files for anyone with a real osu! folder and would take
-    a long time before the watcher actually starts. If you want to import
-    your history, use `taiko-uploader backfill` explicitly (once).
+    Watches for NEW plays only. Never touches historic .osr — those stay
+    on your disk untouched unless you explicitly run `taiko-uploader
+    backfill` to import them.
 
-    On subsequent runs (state file exists with known uploads), does a
-    quiet catch-up scan for files recorded while the uploader was off.
+    On first launch: marks every existing .osr in the folder as
+    "seen, skipped" in local state. From then on the watcher only fires
+    on files that appear AFTER first launch. Between runs, if you played
+    while the uploader was off, those new files still get picked up
+    (they weren't seen at first-launch snapshot time, so they're not
+    marked, so catch-up handles them).
     """
     cfg = load_config()
     state = State(_state_path())
+    folder = Path(cfg.replays_folder)
 
-    # First run heuristic: state is empty → skip backfill, print a hint.
-    # Second run onward: catch-up is fast (state already knows most files).
     with sqlite3.connect(str(_state_path())) as _c:
         known_count = _c.execute("SELECT COUNT(*) FROM uploaded").fetchone()[0]
 
-    with httpx.Client() as client:
-        if known_count == 0:
-            folder_files = 0
-            folder_p = Path(cfg.replays_folder)
-            if folder_p.is_dir():
-                folder_files = sum(1 for _ in folder_p.glob("*.osr"))
-            if folder_files > 20:
-                print(
-                    f"First run: skipping catch-up ({folder_files} .osr files in "
-                    f"{cfg.replays_folder}).\n"
-                    f"To import your existing history, stop this and run "
-                    f"`taiko-uploader backfill` first.\n"
-                )
-            else:
-                print("First run: catching up on existing replays…")
-                up, sk = backfill(cfg, state, client)
-                print(f"Catch-up done: {up} uploaded, {sk} skipped\n")
+    if known_count == 0:
+        # First run — snapshot the folder so historic files are permanently
+        # ignored. This is idempotent: state gets one row per file, with
+        # replay_id=NULL and map_title=SKIPPED_HISTORIC to identify why.
+        if not folder.is_dir():
+            print(f"WARNING: replays folder {folder} doesn't exist yet — "
+                  f"will pick up files once you create it.")
         else:
-            print("Catching up on any replays saved while offline…")
-            up, sk = backfill(cfg, state, client)
-            if up + sk > 0:
-                print(f"Catch-up done: {up} uploaded, {sk} skipped\n")
+            existing = list(folder.glob("*.osr"))
+            for p in existing:
+                state.record(p.name, "", None,
+                             {"map_title": "SKIPPED_HISTORIC"})
+            print(f"First run: snapshotted {len(existing)} existing "
+                  f".osr as skipped (history import off).")
+            print("Use `taiko-uploader backfill` if you want to import "
+                  "some or all of them later.\n")
+    else:
+        # Later runs: quiet catch-up for anything played while offline.
+        # Only NEW files (not in state) trigger uploads.
+        with httpx.Client() as client:
+            new_files = [
+                p for p in folder.glob("*.osr")
+                if folder.is_dir() and not state.known(p.name)
+            ] if folder.is_dir() else []
+            if new_files:
+                print(f"Catching up on {len(new_files)} replays saved "
+                      f"while offline…")
+                for p in new_files:
+                    _process_one(client, cfg, state, p)
+                print()
 
+    with httpx.Client() as client:
         watch_and_upload(cfg, state, client)
     state.close()
     return 0
@@ -520,10 +551,14 @@ def cmd_status() -> int:
         print(str(e), file=sys.stderr)
         return 1
     state = State(_state_path())
+    stats = state.stats()
     print("Config:")
     print(f"  server:  {cfg.server_url}")
     print(f"  token:   {cfg.api_token[:24]}…")
     print(f"  folder:  {cfg.replays_folder}")
+    print(f"\nState: {stats['uploaded']} uploaded"
+          f"  ·  {stats['skipped_historic']} skipped-historic"
+          f"  ·  {stats['total']} total known")
     recent = state.recent(limit=10)
     print(f"\nLast {len(recent)} uploads:")
     if not recent:
