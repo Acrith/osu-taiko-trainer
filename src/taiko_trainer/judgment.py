@@ -122,7 +122,6 @@ def judge_replay(
     beatmap: TaikoBeatmap,
     replay: TaikoReplay,
     od_mult: float = 1.0,
-    hit_window_mult: float = 1.0,
 ) -> JudgedReplay:
     """Pair map notes with replay key-downs and classify each note.
 
@@ -130,17 +129,17 @@ def judge_replay(
     then recomputed at the effective OD — this is how osu!taiko really
     handles HR/EZ.
 
-    `hit_window_mult` scales the final wall-clock windows for speed
-    mods (DT = 1/1.5, HT = 1/0.75).
-
-    Callers typically pass both from `parse_mods(replay.meta.mods)`.
-    The beatmap passed in should already be mod-scaled (via
-    `apply_mods_to_beatmap`) so note times line up with the replay's
-    wall-clock event times."""
+    Speed mods (DT/HT) do NOT need to be threaded in here. osu! records
+    replay events in music-time (the same clock the .osu note times use),
+    and DT/HT tighten wall-clock windows by exactly the factor that
+    converts music-time to wall-clock, so the two scalings cancel: the
+    music-time window equals the NM music-time window. Pass the ORIGINAL
+    (unscaled) beatmap; do not call `apply_mods_to_beatmap` before this.
+    (`apply_mods_to_beatmap` is still the right thing for feature
+    extraction, which needs the wall-clock experience.)"""
     windows = JudgmentWindows.from_od(
         beatmap.difficulty.overall_difficulty,
         od_mult=od_mult,
-        hit_window_mult=hit_window_mult,
     )
     hittable = beatmap.hittable()
     events = replay.key_down_events()  # tuple of (time_ms, single-key TaikoInput)

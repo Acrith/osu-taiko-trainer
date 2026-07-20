@@ -157,7 +157,8 @@ def refresh_ratings(workspace: str) -> None:
                     Path(tmp_path).unlink(missing_ok=True)
                 mods = parse_mods(rp.meta.mods)
                 play_bm = apply_mods_to_beatmap(bm, mods)
-                feats = extract_features(play_bm)
+                play_feats = extract_features(play_bm)   # for eff-rating (DT experience)
+                base_feats = extract_features(bm)        # for classification (music-time)
                 # Resolve style from player_info (per-DB). DDKK/KKDD trigger
                 # eff-rating recompute even for NM plays so skill vectors
                 # reflect their actual play cost model.
@@ -166,7 +167,7 @@ def refresh_ratings(workspace: str) -> None:
                 style_alters = style in ("ddkk", "kkdd")
                 eff_rating = (
                     rate_map(
-                        feats,
+                        play_feats,
                         od=bm.difficulty.overall_difficulty,
                         od_mult=mods.od_mult,
                         hit_window_mult=mods.hit_window_mult,
@@ -175,10 +176,11 @@ def refresh_ratings(workspace: str) -> None:
                     )
                     if (mods.alters_map or style_alters) else None
                 )
-                judged = judge_replay(play_bm, rp, od_mult=mods.od_mult, hit_window_mult=mods.hit_window_mult)
-                classes = classify_failures(judged, play_bm, feats)
+                # Judge against ORIGINAL bm — see judge_replay's docstring for why.
+                judged = judge_replay(bm, rp, od_mult=mods.od_mult)
+                classes = classify_failures(judged, bm, base_feats)
                 summary = summarize_failures(classes)
-                miss_patterns = extract_miss_patterns(classes, play_bm.hittable())
+                miss_patterns = extract_miss_patterns(classes, bm.hittable())
                 cheese = detect_cheese(judged)
                 update_replay_judgment(
                     conn, r["id"], judged, summary, cheese, miss_patterns,

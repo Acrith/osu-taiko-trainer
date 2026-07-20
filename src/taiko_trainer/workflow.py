@@ -385,11 +385,17 @@ def add_replay(
     )
 
     _report("judge", note=f"running per-note judgment ({mods.label})")
-    judged = judge_replay(play_bm, rp, od_mult=mods.od_mult, hit_window_mult=mods.hit_window_mult)
+    # Judge against the ORIGINAL beatmap: osu! replay events are in music-time,
+    # same clock as the unscaled note times. See judge_replay's docstring.
+    judged = judge_replay(bm, rp, od_mult=mods.od_mult)
     _report("classify", note=f"classifying {judged.count_miss} misses")
-    classifications = classify_failures(judged, play_bm, play_features)
+    # Classification consumes judged.judgments (note refs point to bm), so it
+    # must line up with the SAME timeline — pass bm + its features, not play_bm.
+    # play_features is only used for rate_map (rating reflects DT experience);
+    # classification categorises WHY notes missed, which is invariant to speed.
+    classifications = classify_failures(judged, bm, features)
     summary = summarize_failures(classifications)
-    miss_patterns = extract_miss_patterns(classifications, play_bm.hittable())
+    miss_patterns = extract_miss_patterns(classifications, bm.hittable())
     cheese = detect_cheese(judged)
 
     _report("store", note="writing to database")
