@@ -154,17 +154,21 @@ def _setup_dialog() -> Config | None:
 class UploaderThread(threading.Thread):
     """Runs the watchdog + upload loop in the background. Communicates status
     via an in-process queue so the tray icon can show "N uploaded today"
-    or similar. Pausable via self._paused flag."""
+    or similar. Pausable via self._paused flag.
 
-    def __init__(self, cfg: Config, state: State):
+    IMPORTANT: sqlite3 connections are tied to the thread that opened them.
+    The State DB gets opened inside `run()` (not __init__) so it lives in
+    the worker thread, not the main tk/tray thread."""
+
+    def __init__(self, cfg: Config):
         super().__init__(daemon=True, name="uploader-watch")
         self.cfg = cfg
-        self.state = state
         self._stop = threading.Event()
         self._paused = threading.Event()
         self.uploads_today = 0
         self.last_upload: str | None = None
         self.status_msg = "Starting…"
+        self.state: State | None = None  # opened in run()
 
     def pause(self) -> None:
         self._paused.set()
@@ -183,6 +187,10 @@ class UploaderThread(threading.Thread):
     def run(self) -> None:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
+
+        # Open State inside this thread so its sqlite3 connection lives here.
+        # Cross-thread use raises sqlite3.ProgrammingError by default.
+        self.state = State(_state_path())
 
         q: "queue.Queue[Path]" = queue.Queue()
 
@@ -235,6 +243,11 @@ class UploaderThread(threading.Thread):
         finally:
             obs.stop()
             obs.join()
+            if self.state is not None:
+                try:
+                    self.state.close()
+                except Exception:
+                    pass
 
 
 # --- Tray icon -------------------------------------------------------------
@@ -286,9 +299,9 @@ def _build_menu(uploader: UploaderThread, cfg: Config, quit_fn) -> pystray.Menu:
 
 
 def _run_tray(cfg: Config) -> None:
-    """Start the watcher thread + system tray. Blocks until user quits."""
-    state = State(_state_path())
-    thread = UploaderThread(cfg, state)
+    """Start the watcher thread + system tray. Blocks until user quits.
+    State DB is owned by the worker thread — see UploaderThread.run()."""
+    thread = UploaderThread(cfg)
     thread.start()
 
     icon = pystray.Icon(APP_NAME, _make_icon(), title=APP_NAME)
@@ -303,7 +316,6 @@ def _run_tray(cfg: Config) -> None:
     # After icon.run() returns (user quit), give the thread a moment to wind down.
     thread.stop()
     thread.join(timeout=3.0)
-    state.close()
 
 
 # --- Entrypoint ------------------------------------------------------------
