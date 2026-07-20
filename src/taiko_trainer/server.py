@@ -437,17 +437,19 @@ def create_app(workspace: str) -> FastAPI:
     # --- Leaderboards + map database (web mode) --------------------------
 
     _DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
+    _DIMS_WITH_TOTAL = ("total",) + _DIMS
 
     @app.get("/leaderboards", response_class=HTMLResponse)
     def leaderboards_overview():
-        """One column per dim, top 5 users each. Header links go to the
-        full per-dim rankings."""
+        """Overall top-N panel (total-skill ranking) featured at top,
+        followed by 6 per-dim column panels."""
+        overall = top_users_by_skill(workspace, "total", limit=10)
         cols = {dim: top_users_by_skill(workspace, dim, limit=5) for dim in _DIMS}
-        return HTMLResponse(_render_leaderboards_overview(cols))
+        return HTMLResponse(_render_leaderboards_overview(overall, cols))
 
     @app.get("/leaderboards/{dim}", response_class=HTMLResponse)
     def leaderboards_dim(dim: str):
-        if dim not in _DIMS:
+        if dim not in _DIMS_WITH_TOTAL:
             return HTMLResponse(_render_error(f"unknown dimension: {dim}"), status_code=400)
         users = top_users_by_skill(workspace, dim, limit=100)
         return HTMLResponse(_render_leaderboards_dim(dim, users))
@@ -575,12 +577,12 @@ def create_app(workspace: str) -> FastAPI:
 
     def _resolve_public_profile(osu_username: str, viewer_uid: int | None):
         """Look up a user by their osu! username → linked per-player DB →
-        privacy check. Returns (report, replays, player_name, target_user)
-        on success, or raises HTTPException(404/403).
+        privacy check. Returns (report, replays, player_name, target_user,
+        is_owner). report/replays/player_name are None when there's no
+        play data — the caller renders a welcome empty-state.
 
-        A missing users row is 404. A private profile viewed by anyone
-        other than the owner is 404 (deliberately not 403 — hide existence
-        from strangers)."""
+        Raises HTTPException(404) only for missing user or private profile
+        viewed by non-owner (privacy 404s masquerade to hide existence)."""
         cat = open_catalog(workspace)
         target_user = get_user_by_username(cat, osu_username)
         cat.close()
@@ -593,13 +595,14 @@ def create_app(workspace: str) -> FastAPI:
 
         player_name = find_player_name_for_user(workspace, target_user["id"])
         if not player_name:
-            raise HTTPException(status_code=404, detail="user has no play data yet")
+            # No per-player DB yet — user exists but hasn't uploaded anything.
+            return None, [], None, target_user, is_owner
 
         conn = open_plays(workspace, player_name)
         report = build_report(conn)
         replays = get_replays(conn) if report else []
         conn.close()
-        return report, replays, player_name, target_user
+        return report, replays, player_name, target_user, is_owner
 
     @app.get("/u/{osu_username}", response_class=HTMLResponse)
     def public_player_page(
@@ -608,11 +611,12 @@ def create_app(workspace: str) -> FastAPI:
         viewer_uid: int | None = Depends(auth_module.current_user_id),
     ):
         try:
-            report, replays, player_name, _ = _resolve_public_profile(osu_username, viewer_uid)
+            report, replays, player_name, target_user, is_owner = _resolve_public_profile(osu_username, viewer_uid)
         except HTTPException as e:
             return HTMLResponse(_render_error(f"{e.detail}"), status_code=e.status_code)
         if report is None:
-            return HTMLResponse(_render_error(f"{osu_username} has no snapshots yet."), status_code=404)
+            # No plays yet — render a welcome empty-state instead of a 404.
+            return HTMLResponse(_render_empty_profile(target_user, is_owner))
         flash_ok = request.query_params.get("ok", "")
         flash_err = request.query_params.get("err", "")
         return _render_report(report, replays, player_name, flash_ok=flash_ok, flash_err=flash_err)
@@ -626,11 +630,13 @@ def create_app(workspace: str) -> FastAPI:
         if dim not in ("speed", "stamina", "gimmick", "technical", "consistency", "reading"):
             return HTMLResponse(_render_error(f"unknown dimension: {dim}"), status_code=400)
         try:
-            report, replays, player_name, _ = _resolve_public_profile(osu_username, viewer_uid)
+            report, replays, player_name, target_user, is_owner = _resolve_public_profile(osu_username, viewer_uid)
         except HTTPException as e:
             return HTMLResponse(_render_error(f"{e.detail}"), status_code=e.status_code)
         if report is None:
-            return HTMLResponse(_render_error(f"{osu_username} has no snapshots yet."), status_code=404)
+            # No plays yet — training suggestions don't apply, send them to
+            # the profile which shows the welcome empty-state.
+            return RedirectResponse(url=f"/u/{osu_username}", status_code=302)
         played_md5s = {r["map_md5"] for r in replays}
         conn = open_plays(workspace, player_name)
         from .suggest import suggest_maps
@@ -3594,7 +3600,10 @@ def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> 
     value + other-dims cluster on the right stays visually aligned with the
     player info cluster on the left regardless of how many dim chips there
     are. Works for both the overview (show_all_dims=False, compact) and the
-    full per-dim ranking (show_all_dims=True, expanded)."""
+    full per-dim ranking (show_all_dims=True, expanded).
+
+    `dim` can be a real dim or 'total' (sum of six). When 'total', the
+    other-dims chips show ALL six dims (no dim is excluded)."""
     av = u.get("osu_avatar_url") or ""
     country = (u.get("osu_country_code") or "").upper()
     main_val = int(u[dim])
@@ -3602,12 +3611,14 @@ def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> 
     country_html = f'<span class="lb-country" title="{country}">{country}</span>' if country else ""
     other_dims_html = ""
     if show_all_dims:
+        # For total: show all 6 dims. For a specific dim: show the other 5.
+        chip_dims = _LEADERBOARD_DIMS if dim == "total" else [d for d in _LEADERBOARD_DIMS if d != dim]
         chips = "".join(
             f'<span class="lb-otherdim" title="{d}: {int(u[d]):,}">'
             f'<span class="lb-otherdim-k">{d[:3]}</span>'
             f'<span class="lb-otherdim-v">{int(u[d]):,}</span>'
             f'</span>'
-            for d in _LEADERBOARD_DIMS if d != dim
+            for d in chip_dims
         )
         other_dims_html = f'<div class="lb-otherdims">{chips}</div>'
     return f"""
@@ -3626,9 +3637,17 @@ def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> 
     </a>"""
 
 
-def _render_leaderboards_overview(cols: dict[str, list[dict]]) -> str:
-    """Six columns, one per dim. Top 5 each. The whole column header is one
-    clickable link to the full ranking."""
+def _render_leaderboards_overview(overall: list[dict], cols: dict[str, list[dict]]) -> str:
+    """Overall top-N panel first (total-skill ranking, cards with all 6 dim
+    chips inline), then six per-dim column panels below. Every panel header
+    is a single clickable link to its full ranking."""
+    overall_cards = "".join(
+        _lb_user_card(i + 1, u, "total", show_all_dims=True)
+        for i, u in enumerate(overall)
+    )
+    if not overall_cards:
+        overall_cards = '<div class="lb-empty">no plays yet — be the first!</div>'
+
     col_html = ""
     for dim in _LEADERBOARD_DIMS:
         users = cols.get(dim, [])
@@ -3643,10 +3662,19 @@ def _render_leaderboards_overview(cols: dict[str, list[dict]]) -> str:
           </a>
           <div class="lb-list">{cards}</div>
         </div>"""
+
     body = f"""
   <section>
     <h1 class="page-title">Leaderboards</h1>
-    <p class="hint">Top players by skill dimension. Ranks are the latest-snapshot values from each player's public profile. Click a column header for the full ranking.</p>
+    <p class="hint">Total-skill ranking on top; per-dimension ranks below. Ranks are the latest-snapshot values from each player's public profile. Click a header for the full ranking.</p>
+  </section>
+
+  <section class="lb-overall-card">
+    <a class="lb-col-title lb-col-title-hero" href="/leaderboards/total">
+      <span class="lb-col-dim">Overall  ·  total skill</span>
+      <span class="lb-col-more">view all →</span>
+    </a>
+    <div class="lb-list lb-list-full">{overall_cards}</div>
   </section>
 
   <section class="lb-overview">
@@ -3667,7 +3695,7 @@ def _render_leaderboards_dim(dim: str, users: list[dict]) -> str:
         cards_html = '<div class="lb-empty">nobody has played yet</div>'
     dim_tabs = " ".join(
         f'<a class="lb-tab {"active" if d == dim else ""}" href="/leaderboards/{d}">{d}</a>'
-        for d in _LEADERBOARD_DIMS
+        for d in ("total",) + _LEADERBOARD_DIMS
     )
     body = f"""
   <section>
@@ -3689,6 +3717,15 @@ def _leaderboards_css() -> str:
     return """
   <style>
     .page-title { font-family: var(--font-mono); font-size: 28px; margin: 0 0 8px; color: var(--ink); }
+    /* Hero "Overall / total skill" panel — visually distinct from the six
+       per-dim columns so it reads as THE headline ranking. */
+    .lb-overall-card {
+      background: var(--panel); border: 1px solid var(--rule);
+      border-radius: 4px; padding: 20px 22px; margin: 20px 0 24px;
+      border-top: 2px solid var(--accent);
+    }
+    .lb-col-title-hero .lb-col-dim { font-size: 15px !important; letter-spacing: 0.14em; }
+
     .lb-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-top: 20px; }
     .lb-col { background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 16px; }
 
@@ -4056,6 +4093,97 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
   </script>
 """
     return _html_page(f"{title} [{version}]", body)
+
+
+def _render_empty_profile(user: dict, is_owner: bool) -> str:
+    """Welcome empty-state for a public profile with no plays yet. Owner-view
+    shows a CTA to upload; stranger-view says the user hasn't played
+    anything yet on this instance."""
+    avatar = user.get("osu_avatar_url") or ""
+    cover = user.get("osu_cover_url") or ""
+    username = user.get("osu_username", "?")
+    country = (user.get("osu_country_code") or "").upper()
+
+    # Same cover treatment as regular profile hero
+    if cover:
+        bg = (
+            "background: "
+            "linear-gradient(180deg, rgba(15,17,20,0.35) 0%, rgba(15,17,20,0.92) 100%), "
+            f'url("{cover}"); '
+            "background-size: cover; background-position: center;"
+        )
+    else:
+        bg = (
+            "background: "
+            "radial-gradient(ellipse at 100% 20%, rgba(176,50,43,0.28) 0%, transparent 55%), "
+            "radial-gradient(ellipse at 0% 100%, rgba(75,106,131,0.22) 0%, transparent 55%), "
+            "#16181D;"
+        )
+    avatar_html = (
+        f'<img class="hero-avatar" src="{avatar}" alt="{username} avatar">'
+        if avatar else ""
+    )
+    country_pill = f'<span class="hero-country">{country}</span>' if country else ""
+
+    if is_owner:
+        cta_html = """
+      <div class="empty-cta">
+        <h2>Get started</h2>
+        <p class="hint">Upload a replay to see your six-dimension skill vector, weakness patterns, and training recommendations.</p>
+        <div class="empty-cta-buttons">
+          <a class="cta-btn primary" href="/upload">Upload a replay</a>
+          <a class="cta-btn" href="/settings/tokens">Set playstyle & mint uploader token</a>
+        </div>
+        <p class="hint" style="margin-top: 18px;">
+          The <b>uploader companion</b> auto-uploads every new play from your osu! Data/r folder,
+          so your report updates without opening a browser. Currently developer-install only;
+          standalone binaries are being packaged.
+        </p>
+      </div>
+"""
+    else:
+        cta_html = f"""
+      <div class="empty-cta">
+        <h2>No plays yet</h2>
+        <p class="hint">{username} is signed up but hasn't uploaded any replays here yet. Check back later, or find someone with data on the <a href="/leaderboards">leaderboards</a>.</p>
+      </div>
+"""
+
+    body = f"""
+  <section class="map-hero" style='{bg}'>
+    <div class="hero-inner {"has-avatar" if avatar else ""}">
+      {avatar_html}
+      <div class="hero-left">
+        <div class="hero-pill-row">
+          <span class="diff-pill">welcome</span>
+        </div>
+        <h1 class="hero-title">{username}</h1>
+        <p class="hero-artist">{country_pill}</p>
+        <p class="hero-meta">new profile · no plays yet</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    {cta_html}
+  </section>
+
+  <style>
+    .empty-cta {{ padding: 20px 0; }}
+    .empty-cta h2 {{ margin-top: 0; }}
+    .empty-cta-buttons {{ display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }}
+    .cta-btn {{
+      display: inline-block; padding: 12px 24px; border: 1px solid var(--rule);
+      background: var(--panel); color: var(--ink); border-radius: 3px;
+      font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.14em;
+      text-transform: uppercase; text-decoration: none;
+    }}
+    .cta-btn:hover {{ border-color: var(--accent); color: var(--accent); text-decoration: none; }}
+    .cta-btn.primary {{ background: var(--accent); color: white; border-color: var(--accent); }}
+    .cta-btn.primary:hover {{ opacity: 0.9; color: white; }}
+  </style>
+"""
+    return _html_page(f"{username} · welcome", body)
 
 
 def _render_upload_page(username: str | None) -> str:

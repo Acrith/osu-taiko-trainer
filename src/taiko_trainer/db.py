@@ -615,13 +615,17 @@ def top_users_by_skill(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Rank public-profile users by their latest snapshot's skill_{dim}.
+    `dim` can also be 'total' — sum of the six dims, useful for an
+    overall ranking.
+
     Returns list of dicts with osu_username, avatar, dim value, plus
     the six dim numbers for a quick sub-row display.
 
     Iterates each user's DB — O(users). Cached for TTL so rapid clicks
     across dim tabs share results."""
     _DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
-    if dim not in _DIMS:
+    _ALL = _DIMS + ("total",)
+    if dim not in _ALL:
         raise ValueError(f"unknown dim {dim!r}")
 
     def compute():
@@ -669,6 +673,7 @@ def top_users_by_skill(
             }
             for d in _DIMS:
                 row[d] = float(snap[f"skill_{d}"] or 0)
+            row["total"] = sum(row[d] for d in _DIMS)
             rows.append(row)
 
         rows.sort(key=lambda r: -r[dim])
