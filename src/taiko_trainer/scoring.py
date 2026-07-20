@@ -312,7 +312,34 @@ def _raw_consistency(f: MapFeatures) -> float:
     return base + flat_reward - tech_penalty - hard_div_penalty - stream_penalty
 
 
-def _raw_reading(f: MapFeatures) -> float:
+def _raw_reading_parts(f: MapFeatures) -> tuple[float, float]:
+    """Return (fast_load, slow_load) — unshaped. Shaped separately by
+    rate_map so mod multipliers (HD) land as they read: fast × 1.25 and
+    slow × 1.75 at the RATING level, not the raw level (which would square
+    them via _shape). See `_raw_reading` docstring for the model itself."""
+    return _raw_reading_split(f)
+
+
+def _raw_reading_split(f: MapFeatures) -> tuple[float, float]:
+    # velocity_dense_p50 is (per-note bpm × sv_multiplier) median in dense
+    # sections. Same BPM-inflation issue as gimmick — scale by the trusted
+    # ratio so a gimmick 727-BPM declaration doesn't fake a huge reading load.
+    scale = _bpm_inflation_scale(f.movement)
+    v = f.reading.velocity_dense_p50 * scale
+
+    dense_p50_n = _norm_up(v, 180, 380)
+    fast_share_n = _norm(f.reading.sustained_share, 0.20, 0.95)
+    fast_load = 55 * dense_p50_n + 45 * fast_share_n
+
+    stack_p50_n = _norm(150.0 - v, 30.0, 100.0) if v > 0 else 0.0
+    stack_share = getattr(f.reading, "stacked_share", 0.0) or 0.0
+    stack_share_n = _norm(stack_share, 0.10, 0.70)
+    stack_load = 35 * stack_p50_n + 30 * stack_share_n
+
+    return fast_load, stack_load
+
+
+def _raw_reading(f: MapFeatures, *, fast_mult: float = 1.0, slow_mult: float = 1.0) -> float:
     """Reading is a TWO-SIDED scroll-velocity pressure.
 
     Comfort band: ~150-280 units (BPM × SV), roughly "1.0 SV at typical
@@ -347,20 +374,12 @@ def _raw_reading(f: MapFeatures) -> float:
     scale = _bpm_inflation_scale(f.movement)
     v = f.reading.velocity_dense_p50 * scale
 
-    # FAST-side pressure (existing model).
-    dense_p50_n = _norm_up(v, 180, 380)
-    fast_share_n = _norm(f.reading.sustained_share, 0.20, 0.95)
-    fast_load = 55 * dense_p50_n + 45 * fast_share_n
-
-    # SLOW-side pressure. Fires when the sustained scroll drops well below
-    # comfort. `getattr` shields against ReadingProfiles from before the
-    # stacked_share field was added (pre-migration snapshots).
-    stack_p50_n = _norm(150.0 - v, 30.0, 100.0) if v > 0 else 0.0
-    stack_share = getattr(f.reading, "stacked_share", 0.0) or 0.0
-    stack_share_n = _norm(stack_share, 0.10, 0.70)
-    stack_load = 35 * stack_p50_n + 30 * stack_share_n
-
-    return fast_load + stack_load
+    # This is the LEGACY sum-then-shape entry point, kept for callers that
+    # pass a single reading_mult. New code path in rate_map calls
+    # `_raw_reading_split` and shapes fast/slow separately so the mults land
+    # at the rating level, not the raw level.
+    fast_load, stack_load = _raw_reading_split(f)
+    return fast_load * fast_mult + stack_load * slow_mult
 
 
 def _od_pressure(
@@ -404,7 +423,9 @@ def rate_map(
     od: float = 5.0,
     od_mult: float = 1.0,
     hit_window_mult: float = 1.0,
-    reading_mult: float = 1.0,
+    reading_mult: float = 1.0,           # DEPRECATED — use the split multipliers
+    reading_fast_mult: float | None = None,
+    reading_slow_mult: float | None = None,
     style: str = "kddk",
 ) -> DimensionRating:
     """Rate the map on the six dimensions.
@@ -414,16 +435,23 @@ def rate_map(
     the wall-clock window after OD lookup (DT = 1/1.5, HT = 1/0.75).
     Splitting the two matches judgment's behavior — HR/EZ recompute at
     effective OD, DT/HT scale windows after.
-    `reading_mult` is the HD reading multiplier (1.25 when HD is on) —
-    HD doesn't change what feature extraction sees, it just makes what's
-    there harder to visually process, so we apply it as a straight
-    multiplier on the reading dim after the structural signal is computed.
 
-    `style` picks between KDDK (default, primary calibration target) and
-    DDKK/KKDD (color-to-hand mapping). Currently only stamina + technical
-    have style-specific paths — the others (speed, gimmick, consistency,
-    reading) are style-neutral. DDKK numbers are FIRST-PASS and need real
-    play-data feedback to refine."""
+    HD amplifies reading asymmetrically:
+      `reading_fast_mult`  1.25 with HD — less visual runway per note.
+      `reading_slow_mult`  1.75 with HD — stacked-note frame gets much
+                           harder to memorise, fade lands on ambiguous
+                           visual state.
+    `reading_mult` is the legacy scalar. If the split values aren't given,
+    both default to reading_mult (preserving old behavior for callers that
+    haven't migrated).
+
+    `style` picks between KDDK (default) and DDKK/KKDD. Only stamina +
+    technical have style-specific paths so far."""
+    if reading_fast_mult is None:
+        reading_fast_mult = reading_mult
+    if reading_slow_mult is None:
+        reading_slow_mult = reading_mult
+
     bonus = _length_bonus(features.hittable_notes)
     pressure = _od_pressure(od, od_mult=od_mult, hit_window_mult=hit_window_mult)
     cons_mult = 1.0 + _OD_BOOST_K_CONSISTENCY * (pressure - 1.0)
@@ -434,5 +462,10 @@ def rate_map(
         gimmick=_shape(_raw_gimmick(features)) * bonus,
         technical=_shape(_raw_technical(features, style=style)) * bonus * tech_mult,
         consistency=_shape(_raw_consistency(features)) * bonus * cons_mult,
-        reading=_shape(_raw_reading(features)) * bonus * reading_mult,
+        # Reading is shaped per-side so HD's asymmetric mults (fast 1.25×,
+        # slow 1.75×) land at the rating level rather than getting squared
+        # by _shape. Sum-then-shape (via _raw_reading) would give 1.56× and
+        # 3.06× post-shape from the same mults.
+        reading=(_shape(_raw_reading_split(features)[0]) * reading_fast_mult
+                 + _shape(_raw_reading_split(features)[1]) * reading_slow_mult) * bonus,
     )

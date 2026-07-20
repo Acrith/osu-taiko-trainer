@@ -883,11 +883,19 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
     # pressure: notes visually pile up because scroll doesn't clear them
     # before the next lands. Both are hard; the comfort band is ~150-280
     # (roughly bpm × 1.0 SV at typical taiko tempos).
+    #
+    # DENSITY FILTER: both flags also require the note to be in a dense
+    # stretch (same threshold as dense_velocities). A lone slow note in a
+    # rest region doesn't stack — nothing else is on screen. A lone SV
+    # spike over a rest isn't fast-scroll pressure — you can see it coming.
+    # Reading pressure only exists where scroll deviation MEETS density.
     HIGH = 280
     LOW = 150
     sustained_flag = [0] * n
     stacked_flag = [0] * n
     for i in range(n):
+        if local_counts[i] < density_threshold:
+            continue
         t = times[i]
         # Notes within ±200ms of this one.
         j_lo = i

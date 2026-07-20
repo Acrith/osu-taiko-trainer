@@ -171,7 +171,8 @@ def refresh_ratings(workspace: str) -> None:
                         od=bm.difficulty.overall_difficulty,
                         od_mult=mods.od_mult,
                         hit_window_mult=mods.hit_window_mult,
-                        reading_mult=mods.reading_mult,
+                        reading_fast_mult=mods.reading_fast_mult,
+                        reading_slow_mult=mods.reading_slow_mult,
                         style=style,
                     )
                     if (mods.alters_map or style_alters) else None

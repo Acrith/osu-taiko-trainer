@@ -94,11 +94,17 @@ class ModEffects:
                             # the READING dimension. DT stays 1.0 here because
                             # its 1.5× BPM already amplifies scroll velocity through
                             # the `bpm × sv` product in ReadingProfile.
-    reading_mult: float     # 1.0 nm, 1.25 hd — multiplier on the reading dim only.
-                            # HD makes notes fade before the hit point, so you have
-                            # less visual runway to process each note. Doesn't
-                            # change timing, BPM, or SV — the map plays the same,
-                            # you just SEE it worse.
+    reading_mult: float     # DEPRECATED: kept for backwards compat with any external
+                            # callers. Use reading_fast_mult + reading_slow_mult below.
+                            # For HD-on maps this equals reading_fast_mult (the
+                            # milder amplification), preserving old behavior for
+                            # scoring paths that only read the single scalar.
+    reading_fast_mult: float # 1.0 nm, 1.25 hd — HD amplifies fast-scroll reading
+                             # (less visual runway per note flying by).
+    reading_slow_mult: float # 1.0 nm, 1.75 hd — HD amplifies slow-scroll reading
+                             # more — a bigger visual frame of stacked notes has
+                             # to be memorised, and the fade timing lands on notes
+                             # that are already visually confused.
     has_hd: bool            # reading challenge marker (no timing effect)
     has_hr: bool
     has_dt: bool            # true for both DT and NC
@@ -153,14 +159,16 @@ def parse_mods(bitfield: int) -> ModEffects:
     # of scroll velocity (bpm × sv), so we don't double-count them here.
     scroll_mult = 1.4 if has_hr else 1.0
 
-    # HD reading multiplier — notes fade before hit, less visual runway per
-    # note. 1.25 = "reading is 25% harder" on top of whatever scroll pressure
-    # already exists. Applied multiplicatively on the reading dim in
-    # rate_map, so a fast-scroll map with HD stacks on top of the base
-    # reading load, and a slow map with HD is only mildly affected in
-    # absolute terms (matches actual play: HD on Kantan is trivial, HD on
-    # 220+ BPM Inner Oni is brutal).
-    reading_mult = 1.25 if has_hd else 1.0
+    # HD reading multipliers — HD hits the two reading sides asymmetrically.
+    # Fast-scroll side: less visual runway per note (1.25×).
+    # Slow-scroll side: much harder because the stacked frame is bigger AND
+    # the fade timing lands where the visual is already ambiguous (1.75×).
+    # `reading_mult` (the old scalar) equals reading_fast_mult so the
+    # ModEffects.alters_map check still fires and legacy callers see the
+    # milder value.
+    reading_fast_mult = 1.25 if has_hd else 1.0
+    reading_slow_mult = 1.75 if has_hd else 1.0
+    reading_mult = reading_fast_mult
 
     # Label: concatenate active mods in canonical order.
     parts: list[str] = []
@@ -180,6 +188,8 @@ def parse_mods(bitfield: int) -> ModEffects:
         hit_window_mult=hit_window_mult,
         scroll_mult=scroll_mult,
         reading_mult=reading_mult,
+        reading_fast_mult=reading_fast_mult,
+        reading_slow_mult=reading_slow_mult,
         has_hd=has_hd,
         has_hr=has_hr,
         has_dt=has_dt,
