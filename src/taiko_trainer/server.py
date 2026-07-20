@@ -60,9 +60,11 @@ from .judgment import Verdict, judge_replay
 from .osr_parser import parse_osr_file
 from .player import PlayerSkill
 from .report import _compute_dim_contributors, build_report
+from .scoring import rate_map
 from .sessions import group_sessions
 from .suggest import suggest_maps
 from .workflow import _parse_bytes_as_osu, add_replay
+from .db import upsert_map
 
 
 _UPLOAD_TASKS: dict[str, dict] = {}
@@ -733,6 +735,71 @@ def create_app(workspace: str) -> FastAPI:
         return JSONResponse(summary)
 
     # --- Uploader companion API (bearer token auth) ----------------------
+
+    @app.post("/api/v1/maps")
+    async def api_upload_map(
+        file: UploadFile = File(...),
+        authorization: str | None = Header(default=None),
+    ):
+        """Add a map .osu blob to the server's catalog. Used by the local →
+        hosted migration script so replays can reference maps that aren't
+        yet in the shared catalog.
+
+        Idempotent — if the map's md5 is already known, no-op. Bearer token
+        auth (same tokens as /api/v1/replays; any authenticated user can
+        contribute maps to the shared catalog).
+
+        Responses:
+          201 Created         first time this map is stored
+          200 OK              md5 already in catalog, no-op
+          400 Bad Request     unparseable .osu, non-taiko, or missing file
+          401 Unauthorized    missing/invalid/revoked token
+        """
+        raw_token = auth_module.parse_bearer_header(authorization)
+        if not raw_token:
+            raise HTTPException(status_code=401, detail="missing or malformed Authorization header")
+        cat = open_catalog(workspace)
+        user_id = verify_api_token(cat, raw_token)
+        if user_id is None:
+            cat.close()
+            raise HTTPException(status_code=401, detail="token unknown or revoked")
+
+        try:
+            content = await file.read()
+        except Exception as e:
+            cat.close()
+            raise HTTPException(status_code=400, detail=f"could not read map file: {e}")
+        if not content:
+            cat.close()
+            raise HTTPException(status_code=400, detail="empty map file")
+
+        import hashlib as _h
+        md5 = _h.md5(content).hexdigest()
+        existing = get_map(cat, md5)
+        if existing:
+            cat.close()
+            return JSONResponse(
+                {"ok": True, "md5": md5, "created": False, "title": existing["title"]},
+                status_code=200,
+            )
+
+        try:
+            bm = _parse_bytes_as_osu(content)
+        except Exception as e:
+            cat.close()
+            raise HTTPException(status_code=400, detail=f"could not parse .osu: {e}")
+        if bm.mode != 1:
+            cat.close()
+            raise HTTPException(status_code=400, detail=f"not a taiko map (mode={bm.mode})")
+
+        features = extract_features(bm)
+        rating = rate_map(features, od=bm.difficulty.overall_difficulty)
+        upsert_map(cat, bm, features, rating, content)
+        cat.close()
+        return JSONResponse(
+            {"ok": True, "md5": md5, "created": True, "title": bm.meta.title},
+            status_code=201,
+        )
 
     @app.post("/api/v1/replays")
     async def api_upload_replay(

@@ -102,6 +102,15 @@ def main() -> None:
         ws = sys.argv[1] if len(sys.argv) >= 2 else "."
         refresh_ratings(ws)
 
+    elif cmd == "migrate":
+        # `taiko-trainer migrate --workspace ... --server ... --token ... [--player X] [--dry-run]`
+        # Delegates to migrate.main which parses its own args from sys.argv.
+        from .migrate import main as migrate_main
+        # migrate_main uses argparse against sys.argv[1:]; strip off "migrate"
+        # so argparse sees the flags as if it were called directly.
+        sys.argv = ["taiko-trainer migrate"] + sys.argv[2:]
+        sys.exit(migrate_main())
+
     elif cmd == "player":
         from .db import open_plays, upsert_player
         if len(sys.argv) < 4:
