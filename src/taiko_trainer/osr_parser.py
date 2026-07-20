@@ -47,6 +47,125 @@ def parse_osr_file(path: str | Path) -> TaikoReplay:
     return TaikoReplay(meta=meta, frames=frames)
 
 
+def _lazer_extra_bytes(replay_bytes: bytes) -> bytes | None:
+    """Return the raw bytes past the standard-layout end, or None if the
+    replay is stable / unparseable. Lazer appends an LZMA-compressed
+    JSON blob (client_version, mods with settings, statistics, ...)."""
+    try:
+        data = replay_bytes
+        p = 1 + 4
+        def skip_str():
+            nonlocal p
+            if data[p] == 0x00:
+                p += 1; return
+            p += 1
+            shift = 0; length = 0
+            while True:
+                b = data[p]; p += 1
+                length |= (b & 0x7f) << shift
+                if not (b & 0x80): break
+                shift += 7
+            p += length
+        skip_str(); skip_str(); skip_str()
+        p += 2 * 6 + 4 + 2 + 1 + 4
+        skip_str()
+        p += 8
+        rl = struct.unpack_from("<i", data, p)[0]; p += 4
+        p += rl
+        p += 8
+        return data[p:] if len(data) > p else None
+    except Exception:
+        return None
+
+
+def extract_lazer_mod_settings(replay_bytes: bytes) -> dict | None:
+    """Decompress the lazer trailer and return the parsed JSON dict, or
+    None if the replay is stable / trailer unparseable. The JSON includes
+    per-mod settings like {"acronym":"DT","settings":{"speed_change":1.34}}.
+    """
+    import json as _json
+    extra = _lazer_extra_bytes(replay_bytes)
+    if not extra or len(extra) < 5:
+        return None
+    try:
+        blob_len = struct.unpack_from("<i", extra, 0)[0]
+        blob = extra[4:4 + blob_len]
+        text = lzma.decompress(blob, format=lzma.FORMAT_ALONE).decode("utf-8", errors="replace")
+        return _json.loads(text)
+    except Exception:
+        return None
+
+
+def lazer_custom_rate(replay_bytes: bytes) -> float | None:
+    """Return the custom speed multiplier if this is a lazer play using a
+    non-standard rate for DT/HT, else None. Standard-rate lazer plays
+    (DT=1.5×, HT=0.75×) return None — they behave identically to stable.
+    """
+    settings = extract_lazer_mod_settings(replay_bytes)
+    if not settings:
+        return None
+    for mod in settings.get("mods", []):
+        acronym = mod.get("acronym")
+        rate = (mod.get("settings") or {}).get("speed_change")
+        if rate is None:
+            continue
+        if acronym in ("DT", "NC") and abs(rate - 1.5) > 0.01:
+            return rate
+        if acronym in ("HT", "DC") and abs(rate - 0.75) > 0.01:
+            return rate
+    return None
+
+
+def detect_lazer_replay(replay_bytes: bytes) -> bool:
+    """True if the .osr looks like a lazer replay.
+
+    Two independent signals — either fires:
+
+    (1) `game_version` >= 30000000. Lazer uses 3xxxxxxx (Mekrin's Whispered
+        upload = 30000017); stable uses YYYYMMDD dates (~20250815).
+    (2) Extra bytes past the standard-layout end. Stable ends at the
+        online_score_id long; lazer appends a length-prefixed blob with
+        per-mod settings (including SpeedChange for custom-rate DT/HT).
+
+    Returns False on any parse failure — permissive fallback."""
+    try:
+        data = replay_bytes
+        # Signal (1): game_version at bytes 1..4 (mode byte + int).
+        game_version = struct.unpack_from("<i", data, 1)[0]
+        if game_version >= 30_000_000:
+            return True
+        # Signal (2): extra bytes past standard end.
+        p = 5                           # already consumed mode(1) + game_version(4)
+        def skip_str():
+            nonlocal p
+            if data[p] == 0x00:
+                p += 1; return
+            p += 1
+            shift = 0; length = 0
+            while True:
+                b = data[p]; p += 1
+                length |= (b & 0x7f) << shift
+                if not (b & 0x80): break
+                shift += 7
+            p += length
+        skip_str()                      # beatmap_hash
+        skip_str()                      # username
+        skip_str()                      # replay_hash
+        p += 2 * 6                      # counts
+        p += 4                          # score
+        p += 2                          # max_combo
+        p += 1                          # perfect
+        p += 4                          # mods bitfield
+        skip_str()                      # life bar graph
+        p += 8                          # timestamp
+        replay_len = struct.unpack_from("<i", data, p)[0]; p += 4
+        p += replay_len                 # LZMA blob
+        p += 8                          # online_score_id
+        return len(data) > p
+    except Exception:
+        return False
+
+
 def _detect_stripped_setup_offset(path: Path) -> int:
     """Read the raw replay LZMA and return the sum of any leading y=-500 setup
     frames' time deltas that osrparse dropped. In well-formed replays this is 0.

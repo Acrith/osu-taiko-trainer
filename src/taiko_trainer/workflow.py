@@ -316,6 +316,22 @@ def add_replay(
     target_md5 = rp.meta.beatmap_md5.lower()
     player = rp.meta.player
 
+    # Lazer custom-rate check. Lazer supports arbitrary speed_change on DT/HT
+    # (e.g. 1.34× instead of the stable 1.5×). We can extract the exact rate
+    # from lazer's LZMA-compressed mod-settings trailer. Standard-rate lazer
+    # plays are indistinguishable from stable and pass through fine; custom
+    # rates get refused for now because our judgment + rating math assume
+    # the fixed 1.5×/0.75× multipliers.
+    from .osr_parser import lazer_custom_rate
+    _custom_rate = lazer_custom_rate(replay_content)
+    if _custom_rate is not None:
+        return AddResult(False,
+            f"lazer custom-rate play ({_custom_rate:.2f}×) — refused. Only the "
+            f"stable-standard rates (DT=1.50×, HT=0.75×) are supported for now. "
+            f"Custom rates would need judge_replay + rate_map to accept an "
+            f"arbitrary speed multiplier, which isn't wired yet."
+        )
+
     # Find (or download) the map bytes.
     plays = open_plays(workspace, player)
     roots = list_map_roots(plays)
