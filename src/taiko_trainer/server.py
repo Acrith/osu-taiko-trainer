@@ -936,10 +936,30 @@ def create_app(workspace: str) -> FastAPI:
                         row["star_rating"] = sr
                 except Exception:
                     pass
+            # Peer replays on the same map by this player — used to compute
+            # whether THIS replay is the player's best per-dim contribution
+            # for this map (only the best-per-map counts toward snapshots).
+            peer_rows = conn.execute(
+                """
+                SELECT r.id, r.accuracy_judged,
+                       COALESCE(r.rating_speed_eff,       m.rating_speed)       AS rating_speed,
+                       COALESCE(r.rating_stamina_eff,     m.rating_stamina)     AS rating_stamina,
+                       COALESCE(r.rating_gimmick_eff,     m.rating_gimmick)     AS rating_gimmick,
+                       COALESCE(r.rating_technical_eff,   m.rating_technical)   AS rating_technical,
+                       COALESCE(r.rating_consistency_eff, m.rating_consistency) AS rating_consistency,
+                       COALESCE(r.rating_reading_eff,     m.rating_reading, 0)  AS rating_reading
+                FROM replays r JOIN catalog.maps m ON m.md5 = r.map_md5
+                WHERE r.map_md5 = ?
+                """,
+                (row["map_md5_ref"],),
+            ).fetchall()
+            peer_replays = [dict(r) for r in peer_rows]
+        else:
+            peer_replays = []
         conn.close()
         if not row:
             return HTMLResponse(_render_error(f"Replay {replay_id} for {player} not found."), status_code=404)
-        return _render_replay(dict(row), player, features, judged)
+        return _render_replay(dict(row), player, features, judged, peer_replays=peer_replays)
 
     # --- upload ---------------------------------------------------------
 
@@ -3603,8 +3623,9 @@ def _render_replays_table(replays: list[dict], player: str) -> str:
   </section>"""
 
 
-def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
+def _render_replay(row: dict, player: str, features=None, judged=None, peer_replays=None) -> str:
     import json as _json
+    from .player import _accuracy_scaling as _acc_scale
 
     causes_html = ""
     if row.get("classification_json"):
@@ -3661,6 +3682,69 @@ def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
     warning_html = _render_discrepancy_warning(row)
     hero_section = _render_map_hero(row, player)
 
+    # "Your contribution" panel — per-dim raw contribution (rating × accuracy
+    # scaling), plus whether THIS play currently counts in the player's
+    # snapshot (only best-per-map counts per dim; a better attempt on the
+    # same map blocks this one). See player.compute_player_skill for the
+    # de-dup semantics.
+    _DIMS_ORDER = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
+    contrib_section = ""
+    if peer_replays:
+        my_acc = row.get("accuracy_judged") or 0.0
+        my_scale = _acc_scale(my_acc)
+        my_rating = {d: row.get(f"rating_{d}") or 0.0 for d in _DIMS_ORDER}
+        my_contrib = {d: my_rating[d] * my_scale for d in _DIMS_ORDER}
+
+        # Best contribution per dim across all this player's replays on this map
+        best_per_dim = {d: (None, 0.0) for d in _DIMS_ORDER}  # (replay_id, value)
+        for pr in peer_replays:
+            p_scale = _acc_scale(pr.get("accuracy_judged") or 0.0)
+            if p_scale <= 0:
+                continue
+            for d in _DIMS_ORDER:
+                v = (pr.get(f"rating_{d}") or 0.0) * p_scale
+                if v > best_per_dim[d][1]:
+                    best_per_dim[d] = (pr["id"], v)
+
+        rows_html = ""
+        for d in _DIMS_ORDER:
+            my_v = my_contrib[d]
+            best_id, best_v = best_per_dim[d]
+            counts = (best_id == row["id"])
+            badge = (
+                '<span class="contrib-badge counts">counts</span>'
+                if counts else
+                f'<span class="contrib-badge beaten" title="Beaten by replay #{best_id} — {best_v:.0f}">beaten by #{best_id}</span>'
+            )
+            delta = ""
+            if not counts and best_v > 0:
+                delta = f' <span class="contrib-delta">Δ −{best_v - my_v:.0f}</span>'
+            rows_html += (
+                f'<div class="contrib-row">'
+                f'  <span class="contrib-dim">{d}</span>'
+                f'  <span class="contrib-val">{my_v:.0f}</span>'
+                f'  {badge}{delta}'
+                f'</div>'
+            )
+        contrib_section = f"""
+  <section class="card">
+    <h2>Your contribution</h2>
+    <p class="hint">This replay's raw dim contribution (rating × accuracy). Only the best-per-map play counts toward your snapshot for each dim — a stronger attempt on the same map here blocks the others.</p>
+    <div class="contrib-list">{rows_html}</div>
+    <style>
+      .contrib-list {{ display: grid; grid-template-columns: 1fr; gap: 4px; margin-top: 8px; }}
+      .contrib-row {{ display: grid; grid-template-columns: 100px 80px 1fr; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 12px; }}
+      .contrib-row:last-child {{ border-bottom: none; }}
+      .contrib-dim {{ color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.1em; font-size: 10px; }}
+      .contrib-val {{ color: var(--ink); font-size: 16px; text-align: right; font-variant-numeric: tabular-nums; }}
+      .contrib-badge {{ font-size: 9px; padding: 2px 8px; border-radius: 2px; letter-spacing: 0.12em; text-transform: uppercase; border: 1px solid; }}
+      .contrib-badge.counts {{ color: var(--great); border-color: var(--great); background: rgba(70,180,110,0.10); }}
+      .contrib-badge.beaten {{ color: var(--ink-faint); border-color: var(--rule); background: rgba(255,255,255,0.02); }}
+      .contrib-delta {{ color: var(--ink-faint); font-size: 10px; margin-left: 8px; }}
+    </style>
+  </section>
+"""
+
     body = f"""
   <section class="eyebrow-row">
     <span class="eyebrow"><a href="/player/{player}" style="color: var(--ink-muted);">← {player}</a>  ·  replay #{row['id']}</span>
@@ -3681,6 +3765,8 @@ def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
       <div class="stat"><span class="k">reading</span><span class="v">{(row.get('rating_reading') or 0):.0f}</span></div>
     </div>
   </section>
+
+  {contrib_section}
 
   {features_section}
 
