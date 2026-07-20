@@ -606,12 +606,14 @@ def create_app(workspace: str) -> FastAPI:
             cat.close()
             return HTMLResponse(_render_error(f"map {md5!r} not in catalog"), status_code=404)
         # Lazy backfill: pull star rating from osu! API if we don't have it.
+        # sqlite3.Row doesn't have .get(); convert to dict up-front.
+        row = dict(row)
         if row.get("star_rating") is None:
             from .db import ensure_star_rating
             try:
                 sr = ensure_star_rating(cat, md5.lower())
                 if sr is not None:
-                    row = dict(row); row["star_rating"] = sr
+                    row["star_rating"] = sr
             except Exception:
                 pass
         # Reconstruct features from the stored .osu blob so the feature panel
@@ -915,12 +917,15 @@ def create_app(workspace: str) -> FastAPI:
                     judged = None
             # Lazy backfill: fetch star rating from osu! API if we don't
             # have it cached yet. One API call per map, cached forever.
+            # sqlite3.Row supports [key] but not .get(); convert to dict
+            # so both this check + downstream renderers work uniformly.
+            row = dict(row)
             if row.get("star_rating") is None:
                 from .db import ensure_star_rating
                 try:
                     sr = ensure_star_rating(conn, row["map_md5_ref"])
                     if sr is not None:
-                        row = dict(row); row["star_rating"] = sr
+                        row["star_rating"] = sr
                 except Exception:
                     pass
         conn.close()
