@@ -117,6 +117,16 @@ def _upload_progress_cb(task_id: str):
     return cb
 
 
+def _is_admin_user(user) -> bool:
+    """Admin identity comes from the ADMIN_OSU_USERNAME env var (comma-
+    separated for multiple admins). Empty env → no admins, and every /admin
+    request returns 403. Matches on `osu_username` (case-sensitive, as
+    stored in the users table)."""
+    import os as _os
+    admins = [n.strip() for n in _os.environ.get("ADMIN_OSU_USERNAME", "").split(",") if n.strip()]
+    return bool(user) and user["osu_username"] in admins
+
+
 def create_app(workspace: str) -> FastAPI:
     app = FastAPI(title="taiko-trainer")
 
@@ -257,6 +267,7 @@ def create_app(workspace: str) -> FastAPI:
             "osu_user_id": user["osu_user_id"],
             "osu_username": user["osu_username"],
             "osu_avatar_url": user["osu_avatar_url"],
+            "is_admin": _is_admin_user(user),
         })
 
     @app.get("/me")
@@ -450,6 +461,104 @@ def create_app(workspace: str) -> FastAPI:
         set_user_profile_public(cat, uid, public.lower() == "true")
         cat.close()
         return RedirectResponse(url="/settings/tokens", status_code=303)
+
+    # --- Admin: pending-map moderation queue -----------------------------
+
+    def _require_admin(session_cookie: str | None):
+        """Common gate for /admin routes. Returns (user_row, catalog_conn)
+        on success; raises HTTPException(403) otherwise. Caller must close
+        the catalog conn."""
+        if not auth_module.is_web_mode():
+            raise HTTPException(status_code=404)
+        uid = auth_module.read_session_cookie(session_cookie)
+        if uid is None:
+            raise HTTPException(status_code=403, detail="not logged in")
+        cat = open_catalog(workspace)
+        user = get_user_by_id(cat, uid)
+        if not _is_admin_user(user):
+            cat.close()
+            raise HTTPException(status_code=403, detail="not an admin")
+        return user, cat
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def admin_queue(session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME)):
+        """List every map currently in 'pending' status with approve / reject
+        buttons. Admin-only."""
+        from .db import list_pending_maps
+        user, cat = _require_admin(session)
+        pending = list_pending_maps(cat)
+        cat.close()
+        return HTMLResponse(_render_admin_queue(user, pending))
+
+    @app.post("/admin/maps/{md5}/approve")
+    def admin_approve_map(
+        md5: str,
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """Approve a pending map — recomputes its rating and flips status to
+        'approved', then rebuilds skill snapshots for every player who has a
+        replay on this map (so the newly-real ratings feed leaderboards)."""
+        from .db import set_map_status
+        from .workflow import _parse_bytes_as_osu
+        user, cat = _require_admin(session)
+        row = get_map(cat, md5.lower())
+        if not row:
+            cat.close()
+            raise HTTPException(status_code=404, detail="map not found")
+        content = get_map_content(cat, md5.lower())
+        if not content:
+            cat.close()
+            raise HTTPException(status_code=500, detail="map row has no content")
+        bm = _parse_bytes_as_osu(content)
+        features = extract_features(bm)
+        rating = rate_map(features, od=bm.difficulty.overall_difficulty)
+        upsert_map(cat, bm, features, rating, content, status='approved')
+        set_map_status(cat, md5.lower(), 'approved')  # belt-and-suspenders
+        cat.close()
+
+        # Rebuild snapshots for any player who has a replay on this map,
+        # so their leaderboard positions pick up the newly-real ratings.
+        from .db import discover_players, player_db_path, rebuild_snapshots
+        from .ingest import _row_to_perf
+        from .player import compute_player_skill
+        touched = 0
+        for player in discover_players(workspace):
+            p = player_db_path(workspace, player)
+            if not p.exists():
+                continue
+            conn = open_plays(workspace, player)
+            has = conn.execute(
+                "SELECT 1 FROM replays WHERE map_md5 = ? LIMIT 1", (md5.lower(),)
+            ).fetchone()
+            if has:
+                rebuild_snapshots(
+                    conn,
+                    compute_skill_fn=lambda rows: compute_player_skill(
+                        [_row_to_perf(r) for r in rows]
+                    ),
+                )
+                touched += 1
+            conn.close()
+        return RedirectResponse(url=f"/admin?approved={md5}&touched={touched}", status_code=303)
+
+    @app.post("/admin/maps/{md5}/reject")
+    def admin_reject_map(
+        md5: str,
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """Reject a pending map — hard-deletes the map row and every replay
+        that references it, across every player DB. Non-recoverable."""
+        from .db import delete_map_cascade
+        user, cat = _require_admin(session)
+        row = get_map(cat, md5.lower())
+        cat.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="map not found")
+        stats = delete_map_cascade(workspace, md5.lower())
+        return RedirectResponse(
+            url=f"/admin?rejected={md5}&replays={stats['replays_removed']}",
+            status_code=303,
+        )
 
     # --- Leaderboards + map database (web mode) --------------------------
 
@@ -881,18 +990,32 @@ def create_app(workspace: str) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"could not parse .osu: {e}")
 
         features = extract_features(bm)
-        # Central ingest gate: rejects converted diffs + low-star marathons.
-        from .workflow import _reject_reason_for_map
-        reject = _reject_reason_for_map(cat, md5, bm, features)
-        if reject:
+        # Central ingest gate — approve normally, queue marathons, refuse the rest.
+        from .workflow import _moderation_verdict_for_map
+        from .scoring import DimensionRating as _DR
+        verdict, reason = _moderation_verdict_for_map(cat, md5, bm, features)
+        if verdict == 'rejected':
             cat.close()
-            raise HTTPException(status_code=400, detail=f"map rejected: {reject}")
+            raise HTTPException(status_code=400, detail=f"map rejected: {reason}")
+
+        if verdict == 'pending':
+            pending_rating = _DR(speed=0, stamina=0, gimmick=0, technical=0,
+                                 consistency=0, reading=0)
+            upsert_map(cat, bm, features, pending_rating, content, status='pending')
+            cat.close()
+            return JSONResponse(
+                {"ok": True, "md5": md5, "created": True, "status": "pending",
+                 "message": f"map queued for admin review: {reason}",
+                 "title": bm.meta.title},
+                status_code=202,
+            )
 
         rating = rate_map(features, od=bm.difficulty.overall_difficulty)
         upsert_map(cat, bm, features, rating, content)
         cat.close()
         return JSONResponse(
-            {"ok": True, "md5": md5, "created": True, "title": bm.meta.title},
+            {"ok": True, "md5": md5, "created": True, "status": "approved",
+             "title": bm.meta.title},
             status_code=201,
         )
 
@@ -1301,6 +1424,8 @@ header.site nav a.nav-cta.active { background: var(--accent); color: white; }
 .auth-widget .logout-btn:hover { border-color: var(--miss); color: var(--miss); }
 .auth-widget .settings-link { font-size: 16px; color: var(--ink-muted); text-decoration: none; margin: 0 2px; }
 .auth-widget .settings-link:hover { color: var(--ink); text-decoration: none; }
+.auth-widget .admin-link { padding: 2px 8px; border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-decoration: none; }
+.auth-widget .admin-link:hover { background: var(--accent); color: white; text-decoration: none; }
 .eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted); }
 h1 { font-family: var(--font-mono); font-weight: 500; font-size: 32px; letter-spacing: -0.015em; margin: 4px 0 0 0; }
 h2 { font-family: var(--font-mono); font-weight: 500; font-size: 20px; margin: 0 0 8px 0; }
@@ -2252,6 +2377,67 @@ def _mods_chip(label: str | None, *, size: str = "sm") -> str:
     return f' <span class="{css}">{label}</span>'
 
 
+def _render_admin_queue(user, pending: list[dict]) -> str:
+    """Admin approval queue — one row per pending map with an approve/reject
+    form. Shown only to users listed in ADMIN_OSU_USERNAME."""
+    if not pending:
+        body_rows = "<tr><td colspan='7' class='hint' style='text-align:center; padding:24px;'>Queue is empty — no maps awaiting review.</td></tr>"
+    else:
+        parts = []
+        for m in pending:
+            dur = int(m["duration_s"] or 0)
+            dur_s = f"{dur // 60}:{dur % 60:02d}"
+            bpm = f"{int(m['bpm_min'] or 0)}–{int(m['bpm_max'] or 0)}"
+            title = f"{m['artist']} — {m['title']} [{m['version']}]"
+            osu_link = f"<a href='https://osu.ppy.sh/beatmapsets/{m['beatmapset_id']}' target='_blank' rel='noopener'>osu!</a>" if m["beatmapset_id"] else "—"
+            parts.append(f"""
+            <tr>
+              <td><a href="/map/{m['md5']}"><b>{title}</b></a><br><span class="muted">by {m['creator']}</span></td>
+              <td>{dur_s}</td>
+              <td>{int(m['hittable_notes'] or 0):,}</td>
+              <td>{bpm}</td>
+              <td>{m['od']:.1f}</td>
+              <td>{osu_link}</td>
+              <td class="actions">
+                <form method="post" action="/admin/maps/{m['md5']}/approve" style="display:inline">
+                  <button class="approve" type="submit">Approve</button>
+                </form>
+                <form method="post" action="/admin/maps/{m['md5']}/reject" style="display:inline"
+                      onsubmit="return confirm('Reject and DELETE this map + all replays that reference it?');">
+                  <button class="reject" type="submit">Reject</button>
+                </form>
+              </td>
+            </tr>""")
+        body_rows = "".join(parts)
+
+    body = f"""
+  <section>
+    <span class="eyebrow">admin</span>
+    <h1>Approval queue</h1>
+    <p class="hint">Maps longer than 10 min land here first. Approving recomputes ratings and pushes them onto leaderboards; rejecting hard-deletes the map + all replays for it.</p>
+  </section>
+  <section>
+    <table class="admin-queue">
+      <thead><tr><th>map</th><th>length</th><th>notes</th><th>BPM</th><th>OD</th><th>osu!</th><th></th></tr></thead>
+      <tbody>{body_rows}</tbody>
+    </table>
+  </section>
+  <style>
+    .admin-queue {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    .admin-queue th, .admin-queue td {{ padding: 10px 12px; border-bottom: 1px solid var(--rule); text-align: left; }}
+    .admin-queue th {{ font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-muted); }}
+    .admin-queue td.actions {{ white-space: nowrap; text-align: right; }}
+    .admin-queue button {{ padding: 6px 12px; border-radius: 3px; border: 1px solid; font-family: inherit; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; margin-left: 6px; }}
+    .admin-queue button.approve {{ background: var(--great); color: white; border-color: var(--great); }}
+    .admin-queue button.reject  {{ background: transparent; color: var(--miss); border-color: var(--miss); }}
+    .admin-queue button.approve:hover {{ opacity: 0.85; }}
+    .admin-queue button.reject:hover  {{ background: var(--miss); color: white; }}
+    .admin-queue .muted {{ color: var(--ink-muted); font-size: 11px; }}
+  </style>
+"""
+    return _html_page(f"Admin queue ({len(pending)})", body, active="admin")
+
+
 _CAUSE_COLORS = {
     "wrong_color": "#7A4E9E",
     "pattern_parity": "#3E8EBB",
@@ -2422,9 +2608,11 @@ def _html_page(title: str, body: str, active: str = "") -> str:
     }}
     const name = a.osu_username;
     const av = a.osu_avatar_url;
+    const admin = a.is_admin ? '<a class="admin-link" href="/admin" title="Admin queue">ADMIN</a>' : '';
     slot.innerHTML =
       (av ? '<img class="avatar" src="' + av + '" alt="">' : '') +
       '<a class="user" href="/u/' + encodeURIComponent(name) + '">' + name + '</a>' +
+      admin +
       '<a class="settings-link" href="/settings/tokens" title="Settings">⚙</a>' +
       '<form method="post" action="/logout"><button type="submit" class="logout-btn">Logout</button></form>';
   }}).catch(() => {{}});

@@ -78,32 +78,40 @@ MARATHON_DURATION_S = 600.0
 MAX_REASONABLE_BPM = 999.0
 
 
-def _reject_reason_for_map(cat, md5: str, bm: TaikoBeatmap, features) -> str | None:
-    """Return a rejection reason string, or None if the map is fine to catalogue.
+def _moderation_verdict_for_map(cat, md5: str, bm: TaikoBeatmap, features) -> tuple[str, str | None]:
+    """Return (verdict, reason) where verdict is one of:
 
-    Rules:
-      - `bm.mode != 1` — converted (osu!std / catch / mania → taiko) diffs are
-        rejected. Only native taiko maps get in.
-      - Marathons (>10 min) are refused outright. The 6-dim rating model is not
-        designed for them, and endurance content lives in its own genre.
-      - BPM ceiling: some gimmick storyboard maps set timing-point beatLength
-        to near-zero to keep notes off the playfield (players read them from
-        the storyboard). The resulting derived BPM is astronomically high and
-        breaks every BPM-scaled feature. Refuse anything above 999 BPM.
+        'approved'  — accept and rate normally
+        'pending'   — accept but queue for admin review (marathon).
+                      Store map with zeroed ratings; replays for it don't
+                      hit leaderboards until an admin approves.
+        'rejected'  — refuse outright, don't store (converted diff, silly BPM).
+
+    Non-taiko diffs and pathological BPM will never become useful with any
+    admin decision, so they stay hard rejections. Marathons might be a
+    legitimate 7★+ Oni that the admin wants to allow through.
     """
     if bm.mode != 1:
-        return (f"not a native taiko difficulty (mode={bm.mode}); "
+        return ('rejected', f"not a native taiko difficulty (mode={bm.mode}); "
                 "only native taiko maps are catalogued, not converted diffs")
-    if features.density.duration_s > MARATHON_DURATION_S:
-        mins = features.density.duration_s / 60.0
-        return (f"map is {mins:.1f} min long (> {int(MARATHON_DURATION_S/60)} min); "
-                "marathons are not rated by this trainer")
     if features.movement.bpm_max > MAX_REASONABLE_BPM:
-        return (f"map's timing points imply BPM {features.movement.bpm_max:.0f}, "
+        return ('rejected',
+                f"map's timing points imply BPM {features.movement.bpm_max:.0f}, "
                 f"above the {int(MAX_REASONABLE_BPM)} ceiling — likely a "
                 "storyboard-gimmick map (notes read off the storyboard, "
                 "not the playfield) which the rating model can't score")
-    return None
+    if features.density.duration_s > MARATHON_DURATION_S:
+        mins = features.density.duration_s / 60.0
+        return ('pending', f"map is {mins:.1f} min long (> {int(MARATHON_DURATION_S/60)} min); "
+                "queued for admin review before ratings count toward leaderboards")
+    return ('approved', None)
+
+
+# BC alias — some earlier code paths may still import the old name during
+# a rolling redeploy. Remove after next full deploy cycle.
+def _reject_reason_for_map(cat, md5: str, bm, features):
+    verdict, reason = _moderation_verdict_for_map(cat, md5, bm, features)
+    return reason if verdict == 'rejected' else None
 
 
 def _resolve_map(
@@ -328,19 +336,32 @@ def add_replay(
     _report("rate_map", note="computing map features + rating")
     features = extract_features(bm)
 
-    # Ingest gate — reject non-native-taiko diffs and low-star marathons.
+    # Ingest gate — 'rejected' aborts, 'pending' stores with zero ratings
+    # awaiting admin review, 'approved' takes the normal path.
     cat = open_catalog(workspace)
-    reject = _reject_reason_for_map(cat, target_md5, bm, features)
+    verdict, reason = _moderation_verdict_for_map(cat, target_md5, bm, features)
     cat.close()
-    if reject:
-        return AddResult(False, f"map rejected: {reject}")
+    if verdict == 'rejected':
+        return AddResult(False, f"map rejected: {reason}")
 
-    rating = rate_map(features, od=bm.difficulty.overall_difficulty)
-
-    # Store the map in the catalog (blob + cached rating).
-    plays = open_plays(workspace, player)  # this ATTACHes catalog
-    upsert_map(plays, bm, features, rating, map_content)
-    plays.close()
+    if verdict == 'pending':
+        # Zero all dims so leaderboards won't surface this map even if a query
+        # forgets to filter status. Real ratings get computed at approval time.
+        pending_rating = DimensionRating(
+            speed=0.0, stamina=0.0, gimmick=0.0, technical=0.0,
+            consistency=0.0, reading=0.0,
+        )
+        plays = open_plays(workspace, player)
+        upsert_map(plays, bm, features, pending_rating, map_content, status='pending')
+        plays.close()
+        # Note: still proceed to store the replay below — the player's data is
+        # theirs. Snapshots will exclude this replay via the maps.status filter.
+        rating = pending_rating
+    else:
+        rating = rate_map(features, od=bm.difficulty.overall_difficulty)
+        plays = open_plays(workspace, player)  # this ATTACHes catalog
+        upsert_map(plays, bm, features, rating, map_content)
+        plays.close()
 
     # Also ingest sibling difficulties from the beatmap folder. Grows the
     # recommendation pool for free — no additional file search, and any

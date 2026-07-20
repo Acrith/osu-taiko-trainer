@@ -68,7 +68,11 @@ CREATE TABLE IF NOT EXISTS maps (
     rating_reading         REAL,
     parity_mean            REAL NOT NULL,
     parity_hostile_ratio   REAL NOT NULL,
-    inserted_at            TEXT NOT NULL
+    inserted_at            TEXT NOT NULL,
+    -- Moderation: 'approved' (default, ratings count), 'pending' (marathon
+    -- awaiting admin review — ratings zeroed, replays don't hit leaderboards),
+    -- 'rejected' (soft-deleted, kept for audit — normally we hard-delete).
+    status                 TEXT NOT NULL DEFAULT 'approved'
 );
 
 CREATE TABLE IF NOT EXISTS catalog_meta (
@@ -235,6 +239,11 @@ def _migrate_catalog_schema(conn: sqlite3.Connection) -> None:
     existing = {r["name"] for r in conn.execute("PRAGMA table_info(maps)")}
     if "rating_reading" not in existing:
         conn.execute("ALTER TABLE maps ADD COLUMN rating_reading REAL")
+    if "status" not in existing:
+        # SQLite ALTER can't take NOT NULL DEFAULT together on older versions,
+        # so add nullable then backfill + treat NULL as approved in queries.
+        conn.execute("ALTER TABLE maps ADD COLUMN status TEXT")
+        conn.execute("UPDATE maps SET status = 'approved' WHERE status IS NULL")
     # api_tokens table (Task #67) — CREATE IF NOT EXISTS in _CATALOG_SCHEMA
     # handles the fresh case; nothing to migrate for existing catalogs
     # since the whole table is new (older catalogs simply won't have it
@@ -340,8 +349,14 @@ def upsert_map(
     features: MapFeatures,
     rating: DimensionRating,
     content: bytes,
+    status: str = "approved",
 ) -> None:
-    """Insert (or replace) a map row with its raw content + cached rating."""
+    """Insert (or replace) a map row with its raw content + cached rating.
+
+    `status` is 'approved' (default), 'pending' (awaiting admin review), or
+    'rejected'. Pending maps store their content + metadata but callers
+    typically pass a zeroed rating so leaderboards/joins don't accidentally
+    surface them even if the query forgets the status filter."""
     r = rating.as_dict()
     # `conn` may be a plays-DB connection with catalog ATTACHed, in which case
     # we route the write to catalog.maps. If it's a raw catalog connection,
@@ -356,8 +371,8 @@ def upsert_map(
             rating_speed, rating_stamina, rating_gimmick, rating_technical, rating_consistency,
             rating_reading,
             parity_mean, parity_hostile_ratio,
-            inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            inserted_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             beatmap.beatmap_md5, content,
@@ -371,10 +386,54 @@ def upsert_map(
             r["speed"], r["stamina"], r["gimmick"], r["technical"], r["consistency"],
             r.get("reading", 0.0),
             features.parity.mean, features.parity.hostile_ratio,
-            _now(),
+            _now(), status,
         ),
     )
     conn.commit()
+
+
+def list_pending_maps(conn: sqlite3.Connection) -> list[dict]:
+    """Every map currently awaiting admin approval, newest-inserted first."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    rows = conn.execute(
+        f"""
+        SELECT md5, artist, title, version, creator, beatmap_id, beatmapset_id,
+               duration_s, hittable_notes, bpm_min, bpm_max, od, inserted_at
+        FROM {schema}.maps
+        WHERE status = 'pending'
+        ORDER BY inserted_at DESC
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_map_status(conn: sqlite3.Connection, md5: str, status: str) -> None:
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    conn.execute(f"UPDATE {schema}.maps SET status = ? WHERE md5 = ?", (status, md5))
+    conn.commit()
+
+
+def delete_map_cascade(workspace: str | Path, md5: str) -> dict:
+    """Remove a map from the catalog and every replay that references it
+    across every player DB. Returns {'replays_removed': int, 'players': [...]}."""
+    stats = {"replays_removed": 0, "players": []}
+    for player in discover_players(workspace):
+        p = player_db_path(workspace, player)
+        if not p.exists():
+            continue
+        pdb = sqlite3.connect(str(p))
+        cur = pdb.execute("DELETE FROM replays WHERE map_md5 = ?", (md5,))
+        removed = cur.rowcount or 0
+        if removed:
+            stats["replays_removed"] += removed
+            stats["players"].append(player)
+        pdb.commit()
+        pdb.close()
+    cat = sqlite3.connect(str(catalog_path(workspace)))
+    cat.execute("DELETE FROM maps WHERE md5 = ?", (md5,))
+    cat.commit()
+    cat.close()
+    return stats
 
 
 def get_catalog_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -771,11 +830,16 @@ def browse_maps(
     schema = "catalog" if _has_attached_catalog(conn) else "main"
     like = f"%{search.strip()}%" if search else "%"
 
+    # Pending / rejected maps stay hidden from public browse until an admin
+    # approves. NULL status (pre-migration rows) is treated as approved.
+    approved = "COALESCE(status, 'approved') = 'approved'"
+
     total = conn.execute(
         f"""
         SELECT COUNT(*) FROM {schema}.maps
         WHERE (title LIKE ? OR version LIKE ? OR creator LIKE ?)
           AND COALESCE({dim_sort}, 0) >= ?
+          AND {approved}
         """,
         (like, like, like, float(min_rating)),
     ).fetchone()[0]
@@ -790,6 +854,7 @@ def browse_maps(
         FROM {schema}.maps
         WHERE (title LIKE ? OR version LIKE ? OR creator LIKE ?)
           AND COALESCE({dim_sort}, 0) >= ?
+          AND {approved}
         ORDER BY {dim_sort} DESC
         LIMIT ? OFFSET ?
         """,
