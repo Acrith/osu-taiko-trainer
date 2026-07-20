@@ -216,7 +216,11 @@ def _raw_consistency(f: MapFeatures) -> float:
     # Polar opposite of TECHNICAL ONLY — a consistency map can still be fast, dense, or
     # gimmicky, as long as the challenge stays predictable throughout. So there is NO
     # BPM penalty and NO SV penalty here; only rhythmic shifting (technical) breaks it.
-    dur_n = _norm_up(f.density.duration_s, 120, 400)
+    # Duration MUST saturate — marathons (60min+) blew this up under _norm_up
+    # (dur_n=12+ → _shape → 30k+ ratings). Above 6:40 a map isn't structurally
+    # more consistent; sustaining it becomes a stamina concern, not a
+    # map-structure one, and stamina has its own dim.
+    dur_n = _norm(f.density.duration_s, 120, 400)
     uniform_density = 1.0 - _norm(f.density.section_nps_stddev_30s, 0.5, 2.5)
     # Divisor simplicity: reward share at the "easy" divisors (1/1, 1/2, 1/4) —
     # stray notes and streams — NOT Shannon entropy of the distribution.
