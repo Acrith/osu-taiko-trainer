@@ -3824,10 +3824,12 @@ def _render_features_panel(f) -> str:
         "burst mean length": "Average length of bursts. 3-4 = quick flurries; 5-6 = pushing into mini-stream territory.",
         "longest burst": "Length in notes of the map's longest burst.",
         "long-burst share (≥7)": "Fraction of bursts that are 7+ notes long — long enough that they start behaving like streams, not bursts.",
-        "dense p50 (bpm × sv)": "Median scroll velocity (BPM × SV) in the map's dense sections. 280+ is where notes \"smidge across the screen\" for KDDK players. Comfort band is roughly 150-280. Below 150 = stack territory, above 280 = fast-scroll.",
-        "sustained-fast share": "Fraction of the map where scroll velocity holds above 280 units in a sustained window (not one-note SV spikes). Captures how much of the map is genuinely fast-scroll.",
-        "stacked share": "Fraction of the map where scroll velocity SUSTAINS below 150 units — notes visually pile up because scroll doesn't clear them before the next lands. Reading pressure from the low side (mirror of sustained-fast).",
-        "overall p95 (unfiltered)": "95th percentile scroll velocity across every note, dense sections OR sparse. Diagnostic only — not scored (spikes during rests don't test reading).",
+        "runway p50 (median dense)": "Median MILLISECONDS a note is visible on the playfield before it must be hit — the actual reaction-time window per note in the dense sections. Computed from stable-taiko's scroll physics (175 × SliderMultiplier × per-note SV × BPM/60, playfield 901.67px @ 16:9). Anchors: >700ms comfort, 500ms brisk, 400ms very hard, <300ms extreme.",
+        "runway p95 (peak-stress)": "5th-percentile (SHORTEST) runway_ms — the fastest moments in the map. Captures peak stress that median glosses over. If p50 and p95 diverge a lot, the map has burst sections where reading briefly gets much harder.",
+        "notes on screen (p95)": "Upper-tail count of notes visible on the playfield at once. Independent of BPM at fixed divisor/SV — depends on divisor and SV. Higher = more visual crowding (stacked notes to disambiguate). Comfort ~8, crowded ~14, very crowded ~20.",
+        "dense p50 (bpm × sv, legacy)": "OLD velocity metric — kept for backward-compat display. Not scored anymore; the runway_ms metric above replaces it.",
+        "sustained-fast share (legacy)": "OLD fast-scroll share metric — not scored anymore.",
+        "stacked share (legacy)": "OLD low-scroll share metric — not scored anymore.",
     }
     def kv(label: str, value: str) -> str:
         tip = tips.get(label, "")
@@ -3899,11 +3901,13 @@ def _render_features_panel(f) -> str:
     </div>
 
     <div class="feat-group">
-      <div class="feat-title"><span>reading</span><span class="feat-val">dense scroll {f.reading.velocity_dense_p50:.0f} · fast {f.reading.sustained_share*100:.0f}% · stacked {getattr(f.reading, 'stacked_share', 0)*100:.0f}%</span></div>
-      {kv("dense p50 (bpm × sv)", f"{f.reading.velocity_dense_p50:.0f}")}
-      {kv("sustained-fast share", f"{f.reading.sustained_share*100:.0f}%")}
-      {kv("stacked share", f"{getattr(f.reading, 'stacked_share', 0)*100:.0f}%")}
-      {kv("overall p95 (unfiltered)", f"{f.reading.velocity_p95:.0f}")}
+      <div class="feat-title"><span>reading</span><span class="feat-val">runway {getattr(f.reading, 'runway_ms_dense_p50', 0):.0f} ms · {getattr(f.reading, 'notes_on_screen_p95', 0):.1f} notes on screen</span></div>
+      {kv("runway p50 (median dense)", f"{getattr(f.reading, 'runway_ms_dense_p50', 0):.0f} ms")}
+      {kv("runway p95 (peak-stress)", f"{getattr(f.reading, 'runway_ms_dense_p95', 0):.0f} ms")}
+      {kv("notes on screen (p95)", f"{getattr(f.reading, 'notes_on_screen_p95', 0):.1f}")}
+      {kv("dense p50 (bpm × sv, legacy)", f"{f.reading.velocity_dense_p50:.0f}")}
+      {kv("sustained-fast share (legacy)", f"{f.reading.sustained_share*100:.0f}%")}
+      {kv("stacked share (legacy)", f"{getattr(f.reading, 'stacked_share', 0)*100:.0f}%")}
     </div>
   </section>"""
 
