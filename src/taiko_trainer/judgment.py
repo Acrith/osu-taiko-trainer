@@ -177,10 +177,16 @@ def judge_replay(
             continue
 
         if lazer_mode:
-            # LAZER: scan for the FIRST correct-color press within the miss
-            # window. Wrong-color presses are ignored (no notelock).
+            # LAZER: a wrong-color press INSIDE the great window still counts
+            # as a bad hit (miss) — that press is clearly "trying to hit this
+            # note" and lazer registers it as a wrong-color drum action. Only
+            # wrong-color presses OUTSIDE the great window (between notes)
+            # get skipped; the note can then be recovered by a later correct
+            # press within the miss window. This is closer to lazer's actual
+            # rules than "skip all wrong-color."
             scan = cursor
             hit_scan = -1
+            wrong_commit_scan = -1
             while scan < n_events:
                 st, sin = events[scan]
                 if st - note_time > windows.miss:
@@ -191,33 +197,43 @@ def judge_replay(
                 if s_color_ok:
                     hit_scan = scan
                     break
+                # wrong color — commit to miss only if inside the great window
+                if wrong_commit_scan < 0 and abs(st - note_time) < windows.great:
+                    wrong_commit_scan = scan
                 scan += 1
 
-            if hit_scan < 0:
-                # No correct-color press within the window → MISS.
+            if hit_scan >= 0:
+                k_time, k_input = events[hit_scan]
+                delta = k_time - note_time
+                abs_delta = abs(delta)
+                if abs_delta < windows.great:
+                    verdict = Verdict.GREAT
+                elif abs_delta < windows.ok:
+                    verdict = Verdict.OK
+                else:
+                    verdict = Verdict.MISS
+                judgments.append(Judgment(
+                    note=note, verdict=verdict,
+                    hit_time_ms=k_time, hit_delta_ms=delta, hit_input=k_input,
+                ))
+                cursor = hit_scan + 1
+            elif wrong_commit_scan >= 0:
+                # Wrong-color press hit the great window and no correct-color
+                # press followed within miss window — commit as MISS.
+                k_time, k_input = events[wrong_commit_scan]
+                delta = k_time - note_time
+                judgments.append(Judgment(
+                    note=note, verdict=Verdict.MISS,
+                    hit_time_ms=k_time, hit_delta_ms=delta, hit_input=k_input,
+                ))
+                cursor = wrong_commit_scan + 1
+            else:
+                # No press within the window → MISS. Cursor stays put.
                 judgments.append(Judgment(
                     note=note, verdict=Verdict.MISS,
                     hit_time_ms=None, hit_delta_ms=None, hit_input=None,
                 ))
-                # Cursor stays where it is — wrong-color events between
-                # notes get re-scanned (and re-skipped) for the next note.
                 continue
-
-            k_time, k_input = events[hit_scan]
-            delta = k_time - note_time
-            abs_delta = abs(delta)
-            if abs_delta < windows.great:
-                verdict = Verdict.GREAT
-            elif abs_delta < windows.ok:
-                verdict = Verdict.OK
-            else:
-                verdict = Verdict.MISS
-
-            judgments.append(Judgment(
-                note=note, verdict=verdict,
-                hit_time_ms=k_time, hit_delta_ms=delta, hit_input=k_input,
-            ))
-            cursor = hit_scan + 1
         else:
             # STABLE: first press within window commits — wrong color = miss.
             k_time, k_input = events[cursor]
