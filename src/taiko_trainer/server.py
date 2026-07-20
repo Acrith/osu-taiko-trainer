@@ -3867,8 +3867,17 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
     bpm_str = f"{bpm_max:.0f}" if same else f"{bpm_min:.0f}–{bpm_max:.0f}"
 
     osu_link = (
-        f'<a class="hero-btn" href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener">Beatmap page</a>'
+        f'<a class="hero-btn primary" href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener">Beatmap page</a>'
         if bid else ""
+    )
+
+    # Cover image from osu!'s CDN — same pattern as _render_map_hero on
+    # replay pages. Falls back to a solid gradient if no beatmapset_id.
+    cover_bg = (
+        f'background-image: linear-gradient(180deg, rgba(15,17,20,0.35) 0%, rgba(15,17,20,0.92) 100%), '
+        f'url("https://assets.ppy.sh/beatmaps/{bset}/covers/cover@2x.jpg");'
+        if bset else
+        'background: linear-gradient(135deg, var(--accent-cool), var(--accent) 90%);'
     )
     plays_rows = ""
     for i, p in enumerate(plays):
@@ -3900,25 +3909,37 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
     <span class="eyebrow"><a href="/maps" style="color: var(--ink-muted);">← maps</a></span>
   </section>
 
-  <section class="card map-hero-simple">
-    <div>
-      <span class="diff-pill">{version}</span>
+  <section class="map-hero" style='{cover_bg}'>
+    <div class="hero-inner">
+      <div class="hero-left">
+        <div class="hero-pill-row">
+          <span class="diff-pill">{version}</span>
+        </div>
+        <h1 class="hero-title">{title}</h1>
+        <p class="hero-artist">{artist}</p>
+        <p class="hero-meta">mapped by <b>{creator}</b>  ·  {row.get('hittable_notes', 0):,} notes</p>
+        <div class="hero-actions">{osu_link}</div>
+      </div>
+      <div class="hero-right">
+        <div class="hero-mapinfo">
+          <div><span class="k">BPM</span><span class="v">{bpm_str}</span></div>
+          <div><span class="k">length</span><span class="v">{dur_str}</span></div>
+          <div><span class="k">notes</span><span class="v">{row.get('hittable_notes', 0):,}</span></div>
+          <div><span class="k">OD</span><span class="v">{row.get('od', 0):.1f}</span></div>
+        </div>
+      </div>
     </div>
-    <h1 class="hero-title" style="margin-top: 10px;">{title}</h1>
-    <p class="hero-artist">{artist}</p>
-    <p class="hero-meta">mapped by <b>{creator}</b>  ·  {bpm_str} BPM  ·  OD {row.get('od', 0):.1f}  ·  {dur_str}  ·  {row.get('hittable_notes', 0):,} notes</p>
-    <div class="hero-actions">{osu_link}</div>
   </section>
 
   <section class="card">
     <h2>Rating</h2>
     <div class="stats-row">
-      <div class="stat"><span class="k">speed</span><span class="v">{int(row.get('rating_speed', 0)):,}</span></div>
-      <div class="stat"><span class="k">stamina</span><span class="v">{int(row.get('rating_stamina', 0)):,}</span></div>
-      <div class="stat"><span class="k">gimmick</span><span class="v">{int(row.get('rating_gimmick', 0)):,}</span></div>
-      <div class="stat"><span class="k">technical</span><span class="v">{int(row.get('rating_technical', 0)):,}</span></div>
-      <div class="stat"><span class="k">consistency</span><span class="v">{int(row.get('rating_consistency', 0)):,}</span></div>
-      <div class="stat"><span class="k">reading</span><span class="v">{int(row.get('rating_reading', 0)):,}</span></div>
+      <div class="stat"><span class="k">speed</span><span class="v">{(row.get('rating_speed') or 0):,.0f}</span></div>
+      <div class="stat"><span class="k">stamina</span><span class="v">{(row.get('rating_stamina') or 0):,.0f}</span></div>
+      <div class="stat"><span class="k">gimmick</span><span class="v">{(row.get('rating_gimmick') or 0):,.0f}</span></div>
+      <div class="stat"><span class="k">technical</span><span class="v">{(row.get('rating_technical') or 0):,.0f}</span></div>
+      <div class="stat"><span class="k">consistency</span><span class="v">{(row.get('rating_consistency') or 0):,.0f}</span></div>
+      <div class="stat"><span class="k">reading</span><span class="v">{(row.get('rating_reading') or 0):,.0f}</span></div>
     </div>
   </section>
 
@@ -3937,11 +3958,6 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
   </section>
 
   <style>
-    .map-hero-simple {{ padding: 24px; }}
-    .map-hero-simple .hero-title {{ font-size: 34px; margin: 4px 0; }}
-    .map-hero-simple .hero-artist {{ color: var(--ink-muted); font-size: 14px; margin: 0 0 4px; }}
-    .map-hero-simple .hero-meta {{ color: var(--ink-faint); font-size: 12px; margin: 0 0 14px; font-family: var(--font-mono); }}
-
     .mp-table {{ width: 100%; border-collapse: separate; border-spacing: 0 3px; font-family: var(--font-mono); }}
     .mp-table th {{ padding: 8px 10px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); text-align: left; }}
     .mp-table th.tabular {{ text-align: right; }}
