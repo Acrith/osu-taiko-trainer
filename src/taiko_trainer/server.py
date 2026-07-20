@@ -819,7 +819,10 @@ def create_app(workspace: str) -> FastAPI:
             rp = parse_osr_file(tmp_path)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
-        judged = judge_replay(bm, rp)
+        # Mod-aware: HR/EZ change the effective windows the player saw.
+        from .mods import parse_mods as _pmods
+        _play_mods = _pmods(row.get("mods_bitfield") or rp.meta.mods or 0)
+        judged = judge_replay(bm, rp, od_mult=_play_mods.od_mult)
         return _render_inspector(dict(row), player, judged, rp)
 
     @app.get("/replay/{player}/{replay_id}/osr")
@@ -878,9 +881,15 @@ def create_app(workspace: str) -> FastAPI:
             if content:
                 try:
                     bm = _parse_bytes_as_osu(content)
-                    features = extract_features(bm)
-                    # Also re-judge to expose per-note timing deltas for the
-                    # timing histogram. Cheap (~10-50ms per replay).
+                    # Mod-aware: features panel should show what the player
+                    # actually experienced (DT-scaled BPM, HR-scaled SV,
+                    # etc.), and the timing histogram's window bands should
+                    # reflect the effective OD (HR / EZ).
+                    from .mods import parse_mods as _pmods, apply_mods_to_beatmap as _amod
+                    _play_mods = _pmods(row.get("mods_bitfield") or 0)
+                    play_bm = _amod(bm, _play_mods)
+                    features = extract_features(play_bm)
+                    # Timing histogram is cheap (~10-50ms per replay).
                     with tempfile.NamedTemporaryFile(suffix=".osr", delete=False) as tmp:
                         tmp.write(bytes(row["content"]))
                         tmp_path = tmp.name
@@ -888,7 +897,10 @@ def create_app(workspace: str) -> FastAPI:
                         rp = parse_osr_file(tmp_path)
                     finally:
                         Path(tmp_path).unlink(missing_ok=True)
-                    judged = judge_replay(bm, rp)
+                    # Judge against the ORIGINAL bm (music-time — see
+                    # judge_replay's docstring), but pass od_mult so windows
+                    # match what the player actually saw.
+                    judged = judge_replay(bm, rp, od_mult=_play_mods.od_mult)
                 except Exception:
                     features = None
                     judged = None
@@ -2217,13 +2229,17 @@ def _render_map_hero(row: dict, player: str) -> str:
         combo_indicator = '<span class="hero-fc fc">FC</span>'
 
     # Map metadata compact row: BPM, notes, duration, OD.
-    dur_s = int(row.get("duration_s") or 0)
+    # Base values live in the row; mods_bitfield lets us show what the PLAYER
+    # actually experienced (DT/HT scale BPM+length, HR/EZ scale OD).
+    from .mods import parse_mods as _parse_mods
+    _mods = _parse_mods(row.get("mods_bitfield") or 0)
+    dur_s = int((row.get("duration_s") or 0) / _mods.speed_mult)   # DT ÷1.5, HT ÷0.75
     duration_str = f"{dur_s // 60}:{dur_s % 60:02d}"
-    bpm_min = row.get("bpm_min") or 0
-    bpm_max = row.get("bpm_max") or 0
+    bpm_min = (row.get("bpm_min") or 0) * _mods.speed_mult
+    bpm_max = (row.get("bpm_max") or 0) * _mods.speed_mult
     bpm_str = f"{bpm_min:.0f}" if abs(bpm_min - bpm_max) < 0.5 else f"{bpm_min:.0f}–{bpm_max:.0f}"
     hittable = row.get("hittable_notes") or 0
-    od = row.get("od") or 0
+    od = min((row.get("od") or 0) * _mods.od_mult, 10.0)            # HR ×1.4 cap 10, EZ ×0.5
 
     beatmap_btn = (
         f'<a class="hero-btn primary" href="https://osu.ppy.sh/beatmaps/{bid}" target="_blank" rel="noopener">Beatmap page</a>'
