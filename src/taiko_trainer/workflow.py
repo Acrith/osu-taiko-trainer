@@ -66,11 +66,16 @@ def _parse_bytes_as_osu(content: bytes) -> TaikoBeatmap:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-# Marathons threshold: anything longer than this needs to clear a star-rating
-# floor to be catalogued. 10 minutes is the community line between "long map"
-# and "marathon" — Konpaku Marathon, Hardyzz's Chikuwa, etc. all sit above it.
+# Marathons — anything longer than this is refused outright. The rating model
+# is not designed for marathons and the community mostly agrees these belong to
+# a different discipline (endurance) than the six-dim trainer targets.
 MARATHON_DURATION_S = 600.0
-MARATHON_MIN_STAR = 7.0
+
+# Any legitimate map's BPM sits under this ceiling — the current wildest maps
+# top out around 500-600 BPM. Storyboard-gimmick maps abuse tiny beatLength
+# values in timing points and produce BPMs in the millions or billions; those
+# blow up every BPM-based term (speed, stamina, reading). Refuse them here.
+MAX_REASONABLE_BPM = 999.0
 
 
 def _reject_reason_for_map(cat, md5: str, bm: TaikoBeatmap, features) -> str | None:
@@ -79,28 +84,25 @@ def _reject_reason_for_map(cat, md5: str, bm: TaikoBeatmap, features) -> str | N
     Rules:
       - `bm.mode != 1` — converted (osu!std / catch / mania → taiko) diffs are
         rejected. Only native taiko maps get in.
-      - Marathons (>10 min) require osu! API star_rating >= 7. Short low-effort
-        marathons would otherwise flood the catalog and leaderboards.
+      - Marathons (>10 min) are refused outright. The 6-dim rating model is not
+        designed for them, and endurance content lives in its own genre.
+      - BPM ceiling: some gimmick storyboard maps set timing-point beatLength
+        to near-zero to keep notes off the playfield (players read them from
+        the storyboard). The resulting derived BPM is astronomically high and
+        breaks every BPM-scaled feature. Refuse anything above 999 BPM.
     """
     if bm.mode != 1:
         return (f"not a native taiko difficulty (mode={bm.mode}); "
                 "only native taiko maps are catalogued, not converted diffs")
     if features.density.duration_s > MARATHON_DURATION_S:
-        from . import osu_api
-        if not osu_api.is_configured(cat):
-            return (f"marathon (>{int(MARATHON_DURATION_S/60)} min) needs osu! API "
-                    "star_rating check but the workspace has no API credentials")
-        try:
-            lookup = osu_api.lookup_beatmap(cat, md5)
-        except osu_api.OsuApiError as e:
-            return f"marathon star_rating check failed: {e}"
-        if lookup is None:
-            return ("marathon not found on osu! API — can't verify star_rating "
-                    "(unranked / removed / md5 mismatch)")
-        if lookup.star_rating < MARATHON_MIN_STAR:
-            return (f"marathon star_rating {lookup.star_rating:.2f}★ is below the "
-                    f"{MARATHON_MIN_STAR:.1f}★ floor for maps longer than "
-                    f"{int(MARATHON_DURATION_S/60)} min")
+        mins = features.density.duration_s / 60.0
+        return (f"map is {mins:.1f} min long (> {int(MARATHON_DURATION_S/60)} min); "
+                "marathons are not rated by this trainer")
+    if features.movement.bpm_max > MAX_REASONABLE_BPM:
+        return (f"map's timing points imply BPM {features.movement.bpm_max:.0f}, "
+                f"above the {int(MAX_REASONABLE_BPM)} ceiling — likely a "
+                "storyboard-gimmick map (notes read off the storyboard, "
+                "not the playfield) which the rating model can't score")
     return None
 
 
