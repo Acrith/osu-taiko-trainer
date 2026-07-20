@@ -191,31 +191,55 @@ def lookup_user(conn: sqlite3.Connection, username: str) -> OsuUser | None:
     )
 
 
+_ZIP_MAGIC = b"PK\x03\x04"
+
+
 def download_osz(beatmapset_id: int) -> bytes:
     """Fetch the raw .osz zip for a beatmapset from one of our mirrors.
-    Tries mirrors in order; first to give a 200 wins. Raises OsuApiError if
-    every mirror fails."""
+    Tries mirrors in order; first to give a REAL zip wins. Some mirrors
+    return HTTP 200 with an HTML error/rate-limit page instead of a proper
+    404, so we verify the ZIP magic bytes and fall through to the next
+    mirror if the body isn't actually a zip. Raises OsuApiError if every
+    mirror fails."""
     last_error = None
     for template in _MIRRORS:
         url = template.format(setid=beatmapset_id)
         try:
             resp = httpx.get(url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True)
-            if resp.status_code == 200 and len(resp.content) > 1024:
-                return resp.content
-            last_error = f"{url} -> HTTP {resp.status_code}"
         except httpx.HTTPError as e:
             last_error = f"{url} -> {e!r}"
+            continue
+        if resp.status_code != 200:
+            last_error = f"{url} -> HTTP {resp.status_code}"
+            continue
+        if len(resp.content) < 1024:
+            last_error = f"{url} -> HTTP 200 but tiny body ({len(resp.content)} bytes)"
+            continue
+        if not resp.content.startswith(_ZIP_MAGIC):
+            # Mirror gave us something (HTML? error page?), not a zip. Try next.
+            head = resp.content[:64].decode("ascii", errors="replace")
+            last_error = f"{url} -> HTTP 200 but not a zip (magic bytes wrong; head={head!r})"
+            continue
+        return resp.content
     raise OsuApiError(f"all osu! mirrors failed for set {beatmapset_id}: {last_error}")
 
 
 def extract_osu_files_from_osz(osz_bytes: bytes) -> dict[str, bytes]:
-    """Return {member_name: content} for every .osu file in the .osz zip."""
-    result: dict[str, bytes] = {}
-    with zipfile.ZipFile(io.BytesIO(osz_bytes)) as z:
-        for name in z.namelist():
-            if name.endswith(".osu"):
-                result[name] = z.read(name)
-    return result
+    """Return {member_name: content} for every .osu file in the .osz zip.
+
+    Raises OsuApiError (not BadZipFile) on corrupt input — download_osz
+    already validates magic bytes, so hitting this branch means the file
+    got corrupted between download and extraction (rare). Caller can
+    surface the error uniformly instead of catching two exception types."""
+    try:
+        result: dict[str, bytes] = {}
+        with zipfile.ZipFile(io.BytesIO(osz_bytes)) as z:
+            for name in z.namelist():
+                if name.endswith(".osu"):
+                    result[name] = z.read(name)
+        return result
+    except zipfile.BadZipFile as e:
+        raise OsuApiError(f"corrupt .osz (BadZipFile): {e}") from e
 
 
 def fetch_map_for_md5(conn: sqlite3.Connection, md5: str) -> tuple[bytes, BeatmapLookup] | None:
