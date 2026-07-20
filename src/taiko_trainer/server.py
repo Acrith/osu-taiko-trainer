@@ -225,8 +225,15 @@ def create_app(workspace: str) -> FastAPI:
         if user:
             ensure_player_db_for_user(workspace, user)
 
+        # First-time users have style='unknown' — send them through the
+        # onboarding picker so their eff-ratings are correct from the very
+        # first play. Returning users skip straight to /me.
+        redirect_url = "/me"
+        if user and (user.get("style") or "unknown") == "unknown":
+            redirect_url = "/onboarding/style"
+
         cookie = auth_module.make_session_cookie(user_id)
-        resp = RedirectResponse(url="/me", status_code=302)
+        resp = RedirectResponse(url=redirect_url, status_code=302)
         resp.set_cookie(
             key=auth_module.SESSION_COOKIE_NAME,
             value=cookie,
@@ -444,6 +451,60 @@ def create_app(workspace: str) -> FastAPI:
             # Non-fatal; the style is set, refresh can be re-run manually.
 
         return RedirectResponse(url="/settings/tokens?ok=style-set", status_code=303)
+
+    @app.get("/onboarding/style", response_class=HTMLResponse)
+    def onboarding_style(session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME)):
+        """First-login playstyle picker. Routed to from oauth_callback when
+        users.style == 'unknown'. Cannot be skipped by URL — visiting again
+        after style is set just redirects to /me."""
+        if not auth_module.is_web_mode():
+            return RedirectResponse(url="/", status_code=302)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        cat = open_catalog(workspace)
+        user = get_user_by_id(cat, uid)
+        cat.close()
+        if not user:
+            return RedirectResponse(url="/login", status_code=302)
+        if (user.get("style") or "unknown") != "unknown":
+            # Already chose — nothing to onboard.
+            return RedirectResponse(url="/me", status_code=302)
+        return HTMLResponse(_render_onboarding_style(user))
+
+    @app.post("/onboarding/style")
+    def onboarding_style_submit(
+        style: str = Form(...),
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """Save the picked style to catalog.users AND (if it exists) sync to
+        the per-player DB's player_info. Redirect to /me. Unlike /settings/
+        style, this endpoint works even before the user has uploaded any
+        replays — style is stored on their catalog.users row from the start."""
+        if not auth_module.is_web_mode():
+            raise HTTPException(status_code=404)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        if style not in ("kddk", "ddkk", "kkdd"):
+            return HTMLResponse(_render_error(f"invalid style: {style!r}"), status_code=400)
+        cat = open_catalog(workspace)
+        cat.execute("UPDATE users SET style = ? WHERE id = ?", (style, uid))
+        cat.commit()
+        cat.close()
+        # Sync to per-player DB if it already exists (rare: user with plays
+        # who never set a style until now). Fresh users skip this branch.
+        player_name = find_player_name_for_user(workspace, uid)
+        if player_name:
+            conn = open_plays(workspace, player_name)
+            upsert_player(conn, player_name, style=style)
+            conn.close()
+            from .ingest import refresh_ratings
+            try:
+                refresh_ratings(str(workspace))
+            except Exception as e:
+                print(f"[onboarding_style] refresh failed: {e}", flush=True)
+        return RedirectResponse(url="/me", status_code=303)
 
     @app.post("/settings/profile-visibility")
     def set_profile_visibility(
@@ -4612,6 +4673,73 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
   </script>
 """
     return _html_page(f"{title} [{version}]", body)
+
+
+def _render_onboarding_style(user: dict) -> str:
+    """Post-first-login playstyle picker. Shown once — after they save a
+    style, catalog.users.style flips from 'unknown' so this route just
+    redirects to /me on subsequent visits."""
+    username = user.get("osu_username", "?")
+    avatar = user.get("osu_avatar_url") or ""
+    body = f"""
+  <section class="onb-hero">
+    {'<img class="onb-avatar" src="' + avatar + '" alt="">' if avatar else ''}
+    <div>
+      <p class="eyebrow">welcome, {username}</p>
+      <h1 class="onb-title">Which playstyle do you use?</h1>
+      <p class="onb-sub">This tells the trainer how to score stamina and technical dims — different playstyles hit different notes with different hands, so the same map costs different amounts of effort.</p>
+      <p class="onb-sub muted">You can change this any time from Settings.</p>
+    </div>
+  </section>
+
+  <form method="post" action="/onboarding/style" class="onb-picker">
+    <label class="onb-choice">
+      <input type="radio" name="style" value="kddk" checked>
+      <div class="onb-card">
+        <span class="onb-code">K D D K</span>
+        <span class="onb-label">Full alternation (recommended)</span>
+        <span class="onb-desc">Outer keys = kat (blue), inner keys = don (red). Left-right strict alternation on streams. Most competitive KDDK players use this.</span>
+      </div>
+    </label>
+    <label class="onb-choice">
+      <input type="radio" name="style" value="ddkk">
+      <div class="onb-card">
+        <span class="onb-code">D D K K</span>
+        <span class="onb-label">Color-to-hand (dons left, kats right)</span>
+        <span class="onb-desc">Both left keys = don, both right keys = kat. Notes map to hand by color rather than position. Longer color runs cost stamina on one hand.</span>
+      </div>
+    </label>
+    <label class="onb-choice">
+      <input type="radio" name="style" value="kkdd">
+      <div class="onb-card">
+        <span class="onb-code">K K D D</span>
+        <span class="onb-label">Color-to-hand (kats left, dons right)</span>
+        <span class="onb-desc">Mirror of DDKK — both left keys = kat, both right keys = don. Same trade-offs.</span>
+      </div>
+    </label>
+    <button type="submit" class="onb-submit">Continue →</button>
+  </form>
+
+  <style>
+    .onb-hero {{ display: flex; gap: 24px; align-items: center; padding: 32px 0 24px; }}
+    .onb-avatar {{ width: 72px; height: 72px; border-radius: 50%; border: 1px solid var(--rule); }}
+    .onb-title {{ font-family: var(--font-mono); font-size: 26px; margin: 4px 0 12px; color: var(--ink); }}
+    .onb-sub {{ font-family: var(--font-sans); color: var(--ink-muted); margin: 4px 0; max-width: 640px; line-height: 1.5; }}
+    .onb-sub.muted {{ color: var(--ink-faint); font-size: 12px; }}
+    .onb-picker {{ display: flex; flex-direction: column; gap: 12px; margin: 20px 0; }}
+    .onb-choice {{ display: block; cursor: pointer; }}
+    .onb-choice input {{ position: absolute; opacity: 0; pointer-events: none; }}
+    .onb-card {{ display: grid; grid-template-columns: 120px 1fr; grid-template-rows: auto auto; gap: 4px 20px; padding: 16px 20px; border: 1px solid var(--rule); border-radius: 4px; transition: border-color 0.1s, background 0.1s; }}
+    .onb-choice:hover .onb-card {{ border-color: var(--accent-soft); background: rgba(255,255,255,0.02); }}
+    .onb-choice input:checked ~ .onb-card {{ border-color: var(--accent); background: rgba(230,80,100,0.05); }}
+    .onb-code {{ grid-column: 1; grid-row: 1 / 3; align-self: center; font-family: var(--font-mono); font-size: 22px; letter-spacing: 0.24em; color: var(--accent); }}
+    .onb-label {{ grid-column: 2; grid-row: 1; font-family: var(--font-mono); font-size: 13px; color: var(--ink); letter-spacing: 0.05em; }}
+    .onb-desc {{ grid-column: 2; grid-row: 2; font-family: var(--font-sans); font-size: 12px; color: var(--ink-muted); line-height: 1.4; }}
+    .onb-submit {{ margin-top: 8px; padding: 12px 28px; background: var(--accent); color: white; border: none; border-radius: 3px; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; align-self: flex-start; }}
+    .onb-submit:hover {{ opacity: 0.9; }}
+  </style>
+"""
+    return _html_page("welcome — pick your playstyle", body)
 
 
 def _render_empty_profile(user: dict, is_owner: bool) -> str:
