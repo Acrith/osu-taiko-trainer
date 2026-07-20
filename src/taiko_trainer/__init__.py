@@ -27,6 +27,9 @@ Commands (all take a workspace path; defaults to current dir "."):
   cleanup --workspace <ws> [--commit]
                                   drop maps that fail the ingest gate + orphan replays
                                   (dry-run by default; --commit to apply)
+  scan-lazer --workspace <ws> [--commit]
+                                  find (and optionally delete) lazer replays with
+                                  custom-rate DT/HT that predate the ingest gate
   player <ws> <player> <style> [notes]
                                   register or update a player's playstyle
   report <ws> <player>            training report + suggestions
@@ -121,6 +124,13 @@ def main() -> None:
         from .cleanup import main as cleanup_main
         sys.argv = ["taiko-trainer cleanup"] + sys.argv[1:]
         sys.exit(cleanup_main())
+
+    elif cmd == "scan-lazer":
+        # `taiko-trainer scan-lazer --workspace <path> [--commit]`
+        # Find (and optionally delete) already-uploaded lazer custom-rate replays.
+        from .scan_lazer import main as scan_lazer_main
+        sys.argv = ["taiko-trainer scan-lazer"] + sys.argv[1:]
+        sys.exit(scan_lazer_main())
 
     elif cmd == "player":
         from .db import open_plays, upsert_player
