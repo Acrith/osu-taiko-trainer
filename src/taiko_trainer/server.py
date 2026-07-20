@@ -3970,8 +3970,8 @@ def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> 
       {'<img class="lb-avatar" src="' + av + '" alt="">' if av else '<span class="lb-avatar-blank"></span>'}
       <div class="lb-card-name">
         <div class="lb-name-row">
-          <span class="lb-name">{u['osu_username']}</span>
           {country_html}
+          <span class="lb-name">{u['osu_username']}</span>
         </div>
         <div class="lb-sub">{replays} replays</div>
       </div>
