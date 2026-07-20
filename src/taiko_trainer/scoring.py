@@ -83,6 +83,29 @@ class DimensionRating:
 # Each returns an UNBOUNDED raw weighted sum. The shape+length pipeline in
 # rate_map() turns raw into the final rating.
 
+def _trusted_bpm(m) -> float:
+    """Sanity-capped BPM. Uses `.bpm_max` from the .osu timing points unless
+    the note stream disagrees strongly — some gimmick maps declare BPM 727
+    (etc.) to sync a storyboard while the actual notes play at ~300. Caps at
+    1.3× the effective (note-stream-derived) BPM in that case.
+
+    Falls back to declared bpm_max when effective can't be derived (very short
+    maps). For legit high-BPM content the two agree and this is a no-op."""
+    if m.bpm_effective <= 0:
+        return m.bpm_max
+    return min(m.bpm_max, m.bpm_effective * 1.3)
+
+
+def _bpm_inflation_scale(m) -> float:
+    """Ratio of trusted to declared BPM. 1.0 = no inflation; <1.0 = mapper
+    trick. Downstream metrics that scale with per-note BPM (reading velocity,
+    sv_bpm_score) get scaled down by this ratio so the same protection
+    applies without editing feature extraction."""
+    if m.bpm_max <= 0:
+        return 1.0
+    return _trusted_bpm(m) / m.bpm_max
+
+
 def _raw_speed(f: MapFeatures) -> float:
     # Speed = motor tempo only: BPM, short-window density, burst shape.
     # SV does NOT belong here — SV creates reading/reaction pressure, which
@@ -96,7 +119,7 @@ def _raw_speed(f: MapFeatures) -> float:
     # density_span from the 10-chunk profile captures "catch-up shape" — a map
     # that goes from sparse to dense mid-run forces the player to react to a
     # tempo shift within the same map.
-    bpm_n = _norm_up(f.movement.bpm_max, 150, 280)
+    bpm_n = _norm_up(_trusted_bpm(f.movement), 150, 280)
     peak200_n = _norm_up(f.density.peak_nps_200ms, 15, 30)
     peak5s_n = _norm_up(f.density.peak_nps_5s, 8, 16)
     peak1s_n = _norm_up(f.density.peak_nps, 10, 20)
@@ -132,7 +155,11 @@ def _raw_stamina(f: MapFeatures, style: str = "kddk") -> float:
 
 
 def _raw_gimmick(f: MapFeatures) -> float:
-    sv_bpm_n = _norm_up(f.gimmick.sv_bpm_score, 5, 300)
+    # sv_bpm_score aggregates per-note (bpm × sv). If the map declares a wild
+    # BPM to sync a storyboard, that inflates sv_bpm_score too — scale down
+    # by the same trusted/declared ratio the other dims use.
+    scale = _bpm_inflation_scale(f.movement)
+    sv_bpm_n = _norm_up(f.gimmick.sv_bpm_score * scale, 5, 300)
     unread_n = _norm(f.gimmick.unreadable_ratio, 0.005, 0.10)
     sv_changes_n = _norm_up(f.movement.sv_changes_per_minute, 5, 200)
     return 55 * sv_bpm_n + 25 * unread_n + 20 * sv_changes_n
@@ -173,7 +200,7 @@ def _raw_technical(f: MapFeatures, style: str = "kddk") -> float:
     # scores meaningfully.
     offgrid_n = _norm(f.rhythm.off_grid_ratio, 0.0, 0.04)
     # Moderate-BPM boost — technical maps are rarely 250 BPM speed monsters.
-    low_bpm_boost = _norm(220 - f.movement.bpm_max, 30, 90)
+    low_bpm_boost = _norm(220 - _trusted_bpm(f.movement), 30, 90)
 
     # Stream-based KDDK signal: aggregated length × parity friction. Blue Army
     # rides on this (159-note streams of short-run mixing with high per-note
@@ -315,7 +342,11 @@ def _raw_reading(f: MapFeatures) -> float:
                                          (SV spikes go higher but are gimmick,
                                           not sustained reading)
     """
-    dense_p50_n = _norm_up(f.reading.velocity_dense_p50, 180, 380)
+    # velocity_dense_p50 is (per-note bpm × sv_multiplier) median in dense
+    # sections. Same BPM-inflation issue as gimmick — scale by the trusted
+    # ratio so a gimmick 727-BPM declaration doesn't fake a huge reading load.
+    scale = _bpm_inflation_scale(f.movement)
+    dense_p50_n = _norm_up(f.reading.velocity_dense_p50 * scale, 180, 380)
     # Anchor 0.20 → 0.95 so the difference between "72% sustained" and "100%
     # sustained" doesn't saturate — that's exactly the boundary between
     # "SV-variable map at high BPM" and "uniform-scroll tournament map",

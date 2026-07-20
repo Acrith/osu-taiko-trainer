@@ -164,6 +164,12 @@ class MovementProfile:
     bpm_min: float
     bpm_max: float
     bpm_change_events: int      # number of adjacent-note transitions that change BPM
+    # Derived from the actual inter-note gaps in dense sections, independent of
+    # what the .osu timing points declare. Gimmick maps that use pathological
+    # BPMs (e.g. 727 BPM as a mapper trick to sync with storyboard) get sanity-
+    # checked by this value; it represents "the tempo at which the fastest
+    # sustained rhythm would be 1/4 notes" — i.e. what the PLAYER feels.
+    bpm_effective: float
     distinct_sv_count: int
     sv_min: float
     sv_max: float
@@ -173,9 +179,35 @@ class MovementProfile:
     sv_changes_per_minute: float
 
 
+def _effective_bpm_from_gaps(hit_objects: tuple[HitObject, ...]) -> float:
+    """The equivalent 1/4-note tempo derived from the note stream itself.
+
+    Collects consecutive inter-note gaps that fall inside a burst (20-500 ms —
+    excludes rest periods and pathologically-tight artifacts), takes the median
+    of the fastest quartile, and reads it as a 1/4-note interval. Result is
+    the BPM that makes those gaps play as quarter notes.
+
+    Anchors against the note stream, not the .osu timing points, so a map with
+    declared BPM 727 but actual note density of ~20 nps comes out around 300.
+    Returns 0 for maps too short to derive meaningfully."""
+    if len(hit_objects) < 10:
+        return 0.0
+    gaps = []
+    for a, b in zip(hit_objects, hit_objects[1:]):
+        g = b.time_ms - a.time_ms
+        if 20 <= g <= 500:
+            gaps.append(g)
+    if len(gaps) < 5:
+        return 0.0
+    gaps.sort()
+    top_q = gaps[:max(3, len(gaps) // 4)]
+    median_top = top_q[len(top_q) // 2]
+    return 15000.0 / median_top
+
+
 def movement_profile(hit_objects: tuple[HitObject, ...], duration_s: float) -> MovementProfile:
     if not hit_objects:
-        return MovementProfile(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        return MovementProfile(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
     bpms = [n.bpm for n in hit_objects]
     svs = [n.sv_multiplier for n in hit_objects]
@@ -190,6 +222,7 @@ def movement_profile(hit_objects: tuple[HitObject, ...], duration_s: float) -> M
         bpm_min=min(bpms),
         bpm_max=max(bpms),
         bpm_change_events=_count_transitions(bpms),
+        bpm_effective=_effective_bpm_from_gaps(hit_objects),
         distinct_sv_count=len({round(s, 3) for s in svs}),
         sv_min=min(svs),
         sv_max=max(svs),

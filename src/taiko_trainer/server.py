@@ -3721,6 +3721,15 @@ def _render_features_panel(f) -> str:
 
     same_bpm = abs(m.bpm_min - m.bpm_max) < 0.5
     bpm_str = f"{m.bpm_max:.0f}" if same_bpm else f"{m.bpm_min:.0f}–{m.bpm_max:.0f}"
+    # Flag maps where the mapper's declared BPM diverges strongly from what the
+    # note stream actually plays at — gimmick maps and half-BPM tricks. The
+    # rating uses the trusted value, not the declared one.
+    bpm_effective = getattr(m, "bpm_effective", 0.0) or 0.0
+    bpm_diverges = bpm_effective > 0 and m.bpm_max > bpm_effective * 1.3
+    bpm_effective_row = (
+        f'<div class="feat-row"><span class="k" title="BPM derived from the actual note stream, not the .osu timing points. The rating is anchored to this value when it diverges strongly from the declared BPM (mapper tricks / storyboard sync).">effective BPM ⓘ</span><span class="v">{bpm_effective:.0f} <span class="muted" style="font-size:10px;">({bpm_effective/m.bpm_max*100:.0f}% of declared)</span></span></div>'
+        if bpm_diverges else ""
+    )
     duration_str = f"{int(d.duration_s)//60}:{int(d.duration_s)%60:02d}"
 
     # Tooltip map for the feature labels that use domain shorthand or
@@ -3777,6 +3786,7 @@ def _render_features_panel(f) -> str:
     <div class="feat-group">
       <div class="feat-title"><span>speed</span><span class="feat-val">{bpm_str} BPM · peak burst {d.peak_nps_200ms:.0f} n/s</span></div>
       {kv("BPM range", bpm_str)}
+      {bpm_effective_row}
       {kv("peak 200ms burst", f"{d.peak_nps_200ms:.1f} notes/s")}
       {kv("peak 1s NPS", f"{d.peak_nps:.1f}")}
       {kv("dominant divisor", f"{r.dominant_divisor} ({r.dominant_divisor_share*100:.0f}%)")}
