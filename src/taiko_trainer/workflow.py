@@ -438,6 +438,10 @@ def add_replay(
     cheese = detect_cheese(judged)
 
     _report("store", note="writing to database")
+    # Detect lazer so insert_replay stores reported counts instead of our
+    # stable-rules judgment (lazer removes notelock → our misses > actual).
+    from .osr_parser import detect_lazer_replay
+    _is_lazer = detect_lazer_replay(replay_content)
     replay_id = insert_replay(
         plays, rp, judged, target_md5, replay_content,
         classification=summary,
@@ -446,6 +450,7 @@ def add_replay(
         mods_bitfield=mods.bitfield,
         mods_label=mods.label,
         effective_rating=play_rating if (mods.alters_map or style_alters) else None,
+        is_lazer=_is_lazer,
     )
 
     # Recompute the player's snapshot including the new replay. Use the

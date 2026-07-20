@@ -169,6 +169,12 @@ CREATE TABLE IF NOT EXISTS replays (
     rating_technical_eff   REAL,
     rating_consistency_eff REAL,
     rating_reading_eff     REAL,
+    -- 1 if the .osr came from osu!lazer (game_version >= 30M OR extra bytes
+    -- past the stable layout). Lazer removes notelock so our stable-rules
+    -- judge_replay over-counts misses; when this flag is set we store the
+    -- REPORTED counts (from the .osr meta) as the "judged" values so
+    -- accuracy_judged matches what the game actually showed the player.
+    is_lazer              INTEGER DEFAULT 0,
     inserted_at           TEXT NOT NULL,
     UNIQUE(map_md5, played_at)
 );
@@ -314,6 +320,7 @@ def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
         ("rating_technical_eff",   "ALTER TABLE replays ADD COLUMN rating_technical_eff REAL"),
         ("rating_consistency_eff", "ALTER TABLE replays ADD COLUMN rating_consistency_eff REAL"),
         ("rating_reading_eff",     "ALTER TABLE replays ADD COLUMN rating_reading_eff REAL"),
+        ("is_lazer",               "ALTER TABLE replays ADD COLUMN is_lazer INTEGER DEFAULT 0"),
     ):
         if col not in replays_existing:
             conn.execute(ddl)
@@ -1319,13 +1326,21 @@ def update_replay_judgment(
     mods_bitfield: int = 0,
     mods_label: str = "NM",
     effective_rating: DimensionRating | None = None,
+    is_lazer: bool = False,
+    reported_meta=None,
 ) -> None:
     """Overwrite the judged fields on an existing replay row (rejudge).
 
     `mods_*` capture what the replay was played with; `effective_rating` is
     the mod-adjusted DimensionRating (differs from the base map rating for
     DT/HR/etc). Passing NM + None leaves eff-rating columns null so
-    downstream COALESCE queries fall back to the base map rating."""
+    downstream COALESCE queries fall back to the base map rating.
+
+    `is_lazer` + `reported_meta` (ReplayMeta): if the replay is a lazer
+    play, our stable-rules judgment over-counts misses (lazer removes
+    notelock). Store the REPORTED counts as the "judged" values instead,
+    matching what the game showed the player. `reported_meta` must be
+    passed when `is_lazer` is True."""
     deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
     if deltas:
         mean = sum(deltas) / len(deltas)
@@ -1338,6 +1353,20 @@ def update_replay_judgment(
     cheese_rate = cheese.cheese_rate if cheese else None
     fast_cheese = cheese.fast_cheese_pairs if cheese else None
     er = effective_rating
+
+    if is_lazer and reported_meta is not None:
+        tot = reported_meta.count_300 + reported_meta.count_100 + reported_meta.count_miss
+        acc = (reported_meta.count_300 + 0.5 * reported_meta.count_100) / tot if tot else 0.0
+        stored_acc = acc
+        stored_great = reported_meta.count_300
+        stored_ok = reported_meta.count_100
+        stored_miss = reported_meta.count_miss
+    else:
+        stored_acc = judged.accuracy
+        stored_great = judged.count_great
+        stored_ok = judged.count_ok
+        stored_miss = judged.count_miss
+
     conn.execute(
         """
         UPDATE replays SET
@@ -1350,12 +1379,13 @@ def update_replay_judgment(
             mods_bitfield = ?, mods_label = ?,
             rating_speed_eff = ?, rating_stamina_eff = ?,
             rating_gimmick_eff = ?, rating_technical_eff = ?,
-            rating_consistency_eff = ?, rating_reading_eff = ?
+            rating_consistency_eff = ?, rating_reading_eff = ?,
+            is_lazer = ?
         WHERE id = ?
         """,
         (
-            judged.accuracy,
-            judged.count_great, judged.count_ok, judged.count_miss,
+            stored_acc,
+            stored_great, stored_ok, stored_miss,
             mean, stddev,
             cheese_rate, fast_cheese,
             classification_json,
@@ -1367,6 +1397,7 @@ def update_replay_judgment(
             er.technical if er else None,
             er.consistency if er else None,
             er.reading if er else None,
+            1 if is_lazer else 0,
             replay_id,
         ),
     )
@@ -1386,6 +1417,7 @@ def insert_replay(
     mods_bitfield: int = 0,
     mods_label: str = "NM",
     effective_rating: DimensionRating | None = None,
+    is_lazer: bool = False,
 ) -> int:
     if deltas is None:
         deltas = [j.hit_delta_ms for j in judged.judgments if j.hit_delta_ms is not None]
@@ -1405,6 +1437,22 @@ def insert_replay(
     fast_cheese = cheese.fast_cheese_pairs if cheese else None
     er = effective_rating
 
+    # Lazer removes notelock, so our stable-rules judgment over-counts misses.
+    # Store the REPORTED counts as the "judged" values — they're what the game
+    # actually scored the player, and skill snapshots should reflect that.
+    # Deltas/cheese/miss_patterns still come from our judgment (per-note timing
+    # info is still accurate; only the miss-count differs).
+    if is_lazer:
+        stored_acc = acc_r
+        stored_great = replay.meta.count_300
+        stored_ok = replay.meta.count_100
+        stored_miss = replay.meta.count_miss
+    else:
+        stored_acc = judged.accuracy
+        stored_great = judged.count_great
+        stored_ok = judged.count_ok
+        stored_miss = judged.count_miss
+
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO replays (
@@ -1419,15 +1467,16 @@ def insert_replay(
             rating_speed_eff, rating_stamina_eff,
             rating_gimmick_eff, rating_technical_eff, rating_consistency_eff,
             rating_reading_eff,
+            is_lazer,
             inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             map_md5, replay_content,
             replay.meta.timestamp.isoformat(),
             replay.meta.score,
-            acc_r, judged.accuracy,
-            judged.count_great, judged.count_ok, judged.count_miss,
+            acc_r, stored_acc,
+            stored_great, stored_ok, stored_miss,
             mean, stddev,
             cheese_rate, fast_cheese,
             classification_json,
@@ -1439,6 +1488,7 @@ def insert_replay(
             er.technical if er else None,
             er.consistency if er else None,
             er.reading if er else None,
+            1 if is_lazer else 0,
             _now(),
         ),
     )

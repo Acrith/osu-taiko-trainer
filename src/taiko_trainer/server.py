@@ -1704,6 +1704,18 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--ground)
   border: 1px solid rgba(255, 193, 71, 0.55);
   backdrop-filter: blur(6px);
 }
+.lazer-pill {
+  display: inline-block;
+  padding: 5px 11px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  background: rgba(255, 105, 200, 0.18);
+  color: #ff9ed4;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 105, 200, 0.45);
+  backdrop-filter: blur(6px);
+}
 .hero-fc {
   display: inline-block;
   font-family: var(--font-mono);
@@ -2301,6 +2313,7 @@ def _render_map_hero(row: dict, player: str) -> str:
           <span class="diff-pill">{row['map_version']}</span>
           {('<span class="star-pill">★ ' + f"{row['star_rating']:.2f}" + '</span>') if row.get('star_rating') else ''}
           {_mods_chip(row.get('mods_label'), size='lg')}
+          {'<span class="lazer-pill" title="osu!lazer replay — reported counts stored directly; stable-rules judgment skipped for accuracy">LAZER</span>' if (row.get('is_lazer') or 0) else ''}
           {combo_indicator}
         </div>
         <h1 class="hero-title">{row['map_title']}</h1>
@@ -2396,7 +2409,13 @@ def _render_upload_progress(task_id: str, entry: dict) -> str:
 def _render_discrepancy_warning(row: dict) -> str:
     """Show a warning banner when our judged accuracy diverges materially from
     the game-reported accuracy. This catches replays whose input data was
-    incompletely written by osu! (see empty-world FC investigation)."""
+    incompletely written by osu! (see empty-world FC investigation).
+
+    Lazer replays now store reported counts directly (not our stable-rules
+    re-judgment), so there's nothing to warn about — the two accuracies
+    match by construction. Suppress the banner."""
+    if (row.get("is_lazer") or 0):
+        return ""
     acc_r = row.get("accuracy_reported") or 0.0
     acc_j = row.get("accuracy_judged") or 0.0
     if acc_r == 0.0:

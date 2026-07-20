@@ -184,11 +184,16 @@ def refresh_ratings(workspace: str) -> None:
                 summary = summarize_failures(classes)
                 miss_patterns = extract_miss_patterns(classes, bm.hittable())
                 cheese = detect_cheese(judged)
+                # Detect lazer so update_replay_judgment stores reported counts.
+                from .osr_parser import detect_lazer_replay as _det_lazer
+                _is_lazer = _det_lazer(bytes(r["content"]))
                 update_replay_judgment(
                     conn, r["id"], judged, summary, cheese, miss_patterns,
                     mods_bitfield=mods.bitfield,
                     mods_label=mods.label,
                     effective_rating=eff_rating,
+                    is_lazer=_is_lazer,
+                    reported_meta=rp.meta if _is_lazer else None,
                 )
                 rejudged += 1
             except Exception as e:
