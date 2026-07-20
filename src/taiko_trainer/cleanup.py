@@ -10,12 +10,12 @@ whose map_md5 is no longer in catalog can't display anything useful anyway).
 
 Dry-run by default. Pass --commit to actually delete.
 
-Usage on droplet:
+Usage on droplet (workspace mount = /workspace inside the container):
     docker compose exec taiko-trainer \\
-        uv run python scripts/cleanup_bad_maps.py --workspace /data
+        taiko-trainer cleanup --workspace /workspace
     # then, if the preview looks right:
     docker compose exec taiko-trainer \\
-        uv run python scripts/cleanup_bad_maps.py --workspace /data --commit
+        taiko-trainer cleanup --workspace /workspace --commit
 """
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def apply_cleanup(workspace: Path, commit: bool) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="cleanup_bad_maps")
+    ap = argparse.ArgumentParser(prog="taiko-trainer cleanup")
     ap.add_argument("--workspace", required=True, help="path to workspace (contains catalog.db)")
     ap.add_argument("--commit", action="store_true",
                     help="actually delete; without this flag, previews only")

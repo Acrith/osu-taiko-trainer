@@ -24,6 +24,9 @@ Commands (all take a workspace path; defaults to current dir "."):
   roots <ws> <player> add|remove|list <path>
                                   per-player map search roots
   refresh <ws>                    re-parse stored blobs + recompute all ratings
+  cleanup --workspace <ws> [--commit]
+                                  drop maps that fail the ingest gate + orphan replays
+                                  (dry-run by default; --commit to apply)
   player <ws> <player> <style> [notes]
                                   register or update a player's playstyle
   report <ws> <player>            training report + suggestions
@@ -111,6 +114,13 @@ def main() -> None:
         from .migrate import main as migrate_main
         sys.argv = ["taiko-trainer migrate"] + sys.argv[1:]
         sys.exit(migrate_main())
+
+    elif cmd == "cleanup":
+        # `taiko-trainer cleanup --workspace <path> [--commit]`
+        # Drops maps that no longer meet the ingest gate + their orphan replays.
+        from .cleanup import main as cleanup_main
+        sys.argv = ["taiko-trainer cleanup"] + sys.argv[1:]
+        sys.exit(cleanup_main())
 
     elif cmd == "player":
         from .db import open_plays, upsert_player
