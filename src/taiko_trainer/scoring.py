@@ -350,26 +350,27 @@ def _raw_reading_split(f: MapFeatures, *, is_hr: bool = False) -> tuple[float, f
     # FAST side — shorter runway = more reaction pressure.
     # Anchors (16:9 wallclock ms):
     #   >700 ms  comfortable    (below threshold, ~0 load)
-    #   500 ms   hard           (mid-range 1/4 HR)
-    #   400 ms   very hard      (Wa~tobi HR)
-    #   300 ms   extreme        (HRDT / semifinals)
-    #   <250 ms  at reaction-time floor
-    runway_load = _norm_up(700.0 - eff_runway_p50, 100, 400)
-    peak_load   = _norm_up(700.0 - eff_runway_p95, 100, 400)
+    #   500 ms   brisk          (mid-range NM or lower-BPM HR)
+    #   400 ms   very hard      (Wa~tobi HR territory — reading breaks down)
+    #   300 ms   extreme        (approaches HRDT)
+    #   <250 ms  past choice-reaction floor (must be muscle memory)
+    runway_load = _norm_up(700.0 - eff_runway_p50, 0, 400)
+    peak_load   = _norm_up(700.0 - eff_runway_p95, 0, 400)
 
-    # MOTOR–COGNITIVE COUPLING (per user's insight): below 500ms runway,
-    # reaction and pattern-comprehension compete for the same cognitive
-    # budget. Simple sparse patterns can still be run on autopilot; DENSE
-    # patterns at short runway become "unreadable" territory because the
-    # brain can't decode + react in the same window.
+    # MOTOR–COGNITIVE COUPLING: below 500ms runway, reaction and pattern-
+    # comprehension compete for the same cognitive budget. A simple sparse
+    # pattern at 400ms is fine; a dense one is chaos. Uses peak_nps (1-sec)
+    # not peak_nps_5s — dense-section instantaneous density matters, not
+    # 5-second averages that get diluted by rests.
     #
-    # Multiplier = 1.0 (comfort) → 2.0 (short-runway AND high-density).
-    # Fires only when BOTH conditions apply — a lone burst at 400ms in an
-    # otherwise sparse map doesn't cross the threshold.
-    peak_nps_5s = getattr(f.density, "peak_nps_5s", 0.0) or 0.0
+    # Multiplier = 1.0 (comfort) → 4.0 (short-runway AND high-density).
+    # Ceiling 4× is deliberate — HRDT plays past the human choice-reaction
+    # floor deserve that extra weight. Fires only when BOTH conditions
+    # apply; a lone burst at 400ms in a sparse map doesn't cross.
+    peak_nps = getattr(f.density, "peak_nps", 0.0) or 0.0
     short_runway_intensity = _norm(500.0 - eff_runway_p50, 0.0, 250.0)  # 0 at 500ms → 1 at 250ms
-    density_intensity = _norm(peak_nps_5s, 12.0, 22.0)                   # 0 at 12nps → 1 at 22nps
-    motor_coupling = 1.0 + 1.0 * short_runway_intensity * density_intensity
+    density_intensity = _norm(peak_nps, 12.0, 22.0)                     # 0 at 12nps → 1 at 22nps
+    motor_coupling = 1.0 + 3.0 * short_runway_intensity * density_intensity
 
     fast_load = (55 * runway_load + 45 * peak_load) * motor_coupling
 
