@@ -27,6 +27,9 @@ services:
       OSU_OAUTH_CLIENT_SECRET: ${OSU_OAUTH_CLIENT_SECRET}
       OSU_OAUTH_REDIRECT_URI: ${OSU_OAUTH_REDIRECT_URI}
       SESSION_SECRET: ${SESSION_SECRET}
+      # Comma-separated osu! usernames that can access /admin (marathon
+      # approval queue). Empty / unset → no admins, /admin returns 403.
+      ADMIN_OSU_USERNAME: ${ADMIN_OSU_USERNAME:-}
 
     volumes:
       # Persistent SQLite workspace lives outside the image so container
