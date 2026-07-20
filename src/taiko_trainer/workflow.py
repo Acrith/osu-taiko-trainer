@@ -400,6 +400,7 @@ def add_replay(
             hit_window_mult=mods.hit_window_mult,
             reading_fast_mult=mods.reading_fast_mult,
             reading_slow_mult=mods.reading_slow_mult,
+            is_hr=mods.has_hr,
             style=style,
         )
         if (mods.alters_map or style_alters)

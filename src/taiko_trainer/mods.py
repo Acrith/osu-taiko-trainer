@@ -154,10 +154,13 @@ def parse_mods(bitfield: int) -> ModEffects:
     if has_dt: hit_window_mult *= 1.0 / 1.5
     if has_ht: hit_window_mult *= 1.0 / 0.75
 
-    # Visual scroll speed. HR bumps SV visually by ~1.4× in stable osu!taiko
-    # (confirmed in-game). DT/HT already amplify scroll through the BPM term
-    # of scroll velocity (bpm × sv), so we don't double-count them here.
-    scroll_mult = 1.4 if has_hr else 1.0
+    # scroll_mult USED to apply HR's visual bump directly to per-note SV in
+    # apply_mods_to_beatmap. That path is now DEPRECATED — reading uses
+    # barrysir's physics formula (features.py `_runway_ms`) and applies HR
+    # at scoring time via the aspect-dependent factor. Keeping scroll_mult
+    # at 1.0 avoids double-counting: apply_mods_to_beatmap no longer
+    # touches SV for HR, and the runway calc handles it end-to-end.
+    scroll_mult = 1.0
 
     # HD reading multipliers — HD hits the two reading sides asymmetrically.
     # Fast-scroll side: less visual runway per note (1.25×).

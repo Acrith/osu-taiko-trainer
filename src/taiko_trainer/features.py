@@ -812,43 +812,67 @@ def gimmick_profile(hittable: tuple[HitObject, ...], avg_nps: float, movement: M
 
 @dataclass(frozen=True)
 class ReadingProfile:
-    """Effective scroll velocity is what a player's eyes and hands have to
-    react to. It's roughly `BPM × SV_multiplier` on the note — a fast SV at
-    low BPM feels similar to a slow SV at high BPM. This is DISTINCT from
-    gimmick: gimmick captures chaotic/unpredictable SV, reading captures a
-    consistent scroll load that just needs faster reaction (fast side) or
-    stack disambiguation (slow side).
+    """Two-sided reading pressure, expressed in the physical units the player
+    actually experiences.
 
-    Reading is a two-sided pressure: fast scroll AND slow scroll are both
-    harder than the middle comfort band. Middle = ~150-280 units (BPM×SV).
-    Below ~150 notes visually stack, above ~280 they fly.
+    FAST side — runway_ms: how long each note is visible on the playfield
+      before it must be hit. Derived from osu!taiko's scroll formula:
+        scroll_pixels_per_beat = 175 × SliderMultiplier × per_note_SV
+        scroll_pixels_per_sec  = scroll × BPM / 60
+        runway_ms              = playfield_pixels / scroll_per_sec × 1000
+      Playfield width depends on aspect (600 × aspect - 165). We assume
+      16:9 (dominant on modern setups): playfield ≈ 901.67 pixels.
+      Shorter runway = tighter reaction window = harder to read.
 
-    velocity_dense_p50  MEDIAN scroll velocity in dense stretches (top ~20%
-                        NPS windows) — the *sustained* scroll the player has
-                        to keep up with. Uniform-SV maps have p50=p95; heavy
-                        SV-variance maps have p50 well below p95, and it's
-                        the p50 that reflects reading load (the p95 spikes
-                        are gimmick moments, not reading pressure).
-    sustained_share     fraction of hittable notes whose ±200ms neighborhood
-                        median velocity is SUSTAINED ABOVE 280 (fast-scroll
-                        pressure). A single SV=2.5 spike doesn't count.
-    stacked_share       fraction of hittable notes whose ±200ms neighborhood
-                        median velocity is SUSTAINED BELOW 150 (stack
-                        pressure — notes visually pile up, hard to read
-                        order + timing). Symmetric to sustained_share for
-                        the low-scroll side.
-    velocity_p95        overall 95th-percentile scroll velocity (unfiltered).
-                        Kept for reference / diagnostics, not scored.
+    SLOW side — notes_on_screen: how many notes are visually stacked in
+      the player's field of view at once. Physically:
+        notes_on_screen ≈ runway_ms × local_nps / 1000
+      Independent of BPM at fixed divisor/SV — a fast BPM makes notes move
+      quickly but doesn't put more notes on screen. Low SV OR high divisor
+      packs more notes into the visible area.
+
+    Both sides are computed CANONICALLY (nomod, 16:9). Mods are applied at
+    scoring time: DT/HT scale runway via BPM (already in play_bm), HR uses
+    the aspect-dependent factor from barrysir's stable-taiko analysis.
+
+    runway_ms_dense_p50    median runway in dense sections (top 20% NPS)
+                           — the sustained reaction pressure the player faces
+    runway_ms_dense_p95    95th-percentile SHORTEST runway (max stress)
+    notes_on_screen_p95    upper-tail of concurrent visible notes
+                           — the crowding pressure
+
+    Legacy fields (kept for the "Why this rating" UI + backward-compat
+    displays; not scored anymore):
+    velocity_dense_p50, sustained_share, stacked_share, velocity_p95
     """
     velocity_dense_p50: float
     sustained_share: float
     stacked_share: float
     velocity_p95: float
+    runway_ms_dense_p50: float
+    runway_ms_dense_p95: float
+    notes_on_screen_p95: float
 
 
-def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
+# Physical constants from barrysir's stable-taiko scroll analysis
+# (https://www.reddit.com/user/barrysir/comments/14wbiyt/).
+_SCROLL_K = 175.0                    # base scroll rate coefficient (pixels/beat @ SV=1)
+_ASPECT_16_9 = 16.0 / 9.0            # assumed default aspect ratio
+_PLAYFIELD_16_9 = 600.0 * _ASPECT_16_9 - 165.0   # ≈ 901.67 pixels
+
+
+def _runway_ms(slider_mult: float, per_note_sv: float, bpm: float) -> float:
+    """Canonical (NM, 16:9) reaction time for one note, in ms.
+    Mods and aspect are applied at scoring time."""
+    if bpm <= 0 or per_note_sv <= 0 or slider_mult <= 0:
+        return 0.0
+    scroll_per_sec = _SCROLL_K * slider_mult * per_note_sv * bpm / 60.0
+    return _PLAYFIELD_16_9 / scroll_per_sec * 1000.0
+
+
+def reading_profile(hittable: tuple[HitObject, ...], slider_multiplier: float = 1.4) -> ReadingProfile:
     if not hittable:
-        return ReadingProfile(0.0, 0.0, 0.0, 0.0)
+        return ReadingProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     # Per-note scroll velocity, clamped so SV=0 (invisible/gimmick) doesn't
     # zero out and drag the percentile down.
@@ -923,11 +947,34 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
     dense_count = sum(1 for c in local_counts if c >= density_threshold)
     denom = dense_count or 1
 
+    # NEW PHYSICS METRICS ────────────────────────────────────────────────
+    # Per-note canonical (NM, 16:9) runway_ms. Mods applied at scoring layer.
+    per_note_runway = [
+        _runway_ms(slider_multiplier, max(n.sv_multiplier, 0.25), n.bpm)
+        for n in hittable
+    ]
+    # notes_on_screen[i] ≈ runway_ms[i] × local_nps[i] / 1000
+    # local_nps derived from the same ±500ms density window used for
+    # dense_velocities above (local_counts[i] over 1000ms window).
+    per_note_on_screen = [
+        per_note_runway[i] * (local_counts[i] / 1000.0)
+        for i in range(n)
+    ]
+    dense_runway = [per_note_runway[i] for i in range(n) if local_counts[i] >= density_threshold]
+
+    runway_p50 = _pctile(dense_runway, 0.50) if dense_runway else 0.0
+    # Shortest 5% = most stressful reads. Use lower percentile of runway.
+    runway_p95 = _pctile(dense_runway, 0.05) if dense_runway else 0.0
+    on_screen_p95 = _pctile(per_note_on_screen, 0.95) if per_note_on_screen else 0.0
+
     return ReadingProfile(
         velocity_dense_p50=_pctile(dense_velocities, 0.50) if dense_velocities else 0.0,
         sustained_share=sum(sustained_flag) / denom,
         stacked_share=sum(stacked_flag) / denom,
         velocity_p95=_pctile(velocities, 0.95),
+        runway_ms_dense_p50=runway_p50,
+        runway_ms_dense_p95=runway_p95,
+        notes_on_screen_p95=on_screen_p95,
     )
 
 
@@ -988,7 +1035,7 @@ def extract_features(beatmap: TaikoBeatmap) -> MapFeatures:
     transitions = transition_profile(hittable, density.duration_s)
     trajectory = trajectory_profile(hittable)
     gimmick = gimmick_profile(hittable, density.avg_nps, movement)
-    reading = reading_profile(hittable)
+    reading = reading_profile(hittable, slider_multiplier=beatmap.difficulty.slider_multiplier)
     segments = segment_profile(hittable, n_segments=10)
     strain = strain_profile(hittable)
     parity = compute_parity(hittable)

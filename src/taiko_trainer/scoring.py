@@ -320,21 +320,65 @@ def _raw_reading_parts(f: MapFeatures) -> tuple[float, float]:
     return _raw_reading_split(f)
 
 
-def _raw_reading_split(f: MapFeatures) -> tuple[float, float]:
-    # velocity_dense_p50 is (per-note bpm × sv_multiplier) median in dense
-    # sections. Same BPM-inflation issue as gimmick — scale by the trusted
-    # ratio so a gimmick 727-BPM declaration doesn't fake a huge reading load.
-    scale = _bpm_inflation_scale(f.movement)
-    v = f.reading.velocity_dense_p50 * scale
+def _raw_reading_split(f: MapFeatures, *, is_hr: bool = False) -> tuple[float, float]:
+    """(fast_load, slow_load) for the reading dim, in raw pre-shape units.
 
-    dense_p50_n = _norm_up(v, 180, 380)
-    fast_share_n = _norm(f.reading.sustained_share, 0.20, 0.95)
-    fast_load = 55 * dense_p50_n + 45 * fast_share_n
+    Uses barrysir's stable-taiko scroll physics:
+    - runway_ms per note is computed at feature-extraction time assuming NM,
+      16:9 aspect. HR is applied here at scoring time via a division by
+      1.867 = 1.4 × (16/9) / (4/3), which is the empirically-measured HR
+      scroll multiplier for widescreen.
+    - notes_on_screen shrinks by the same HR factor (HR spreads notes apart
+      → fewer visible at once).
 
-    stack_p50_n = _norm(150.0 - v, 30.0, 100.0) if v > 0 else 0.0
-    stack_share = getattr(f.reading, "stacked_share", 0.0) or 0.0
-    stack_share_n = _norm(stack_share, 0.10, 0.70)
-    stack_load = 35 * stack_p50_n + 30 * stack_share_n
+    16:9 assumption: we don't know the player's aspect ratio (not in .osr).
+    Modern default. 4:3 players get slightly under-rated reading; 16:9 dead-on.
+    """
+    HR_FACTOR = 1.867 if is_hr else 1.0
+
+    runway_p50 = getattr(f.reading, "runway_ms_dense_p50", 0.0) or 0.0
+    runway_p95 = getattr(f.reading, "runway_ms_dense_p95", 0.0) or 0.0
+    on_screen  = getattr(f.reading, "notes_on_screen_p95", 0.0) or 0.0
+
+    if runway_p50 <= 0:
+        return 0.0, 0.0
+
+    eff_runway_p50 = runway_p50 / HR_FACTOR
+    eff_runway_p95 = runway_p95 / HR_FACTOR
+    eff_on_screen  = on_screen  / HR_FACTOR
+
+    # FAST side — shorter runway = more reaction pressure.
+    # Anchors (16:9 wallclock ms):
+    #   >700 ms  comfortable    (below threshold, ~0 load)
+    #   500 ms   hard           (mid-range 1/4 HR)
+    #   400 ms   very hard      (Wa~tobi HR)
+    #   300 ms   extreme        (HRDT / semifinals)
+    #   <250 ms  at reaction-time floor
+    runway_load = _norm_up(700.0 - eff_runway_p50, 100, 400)
+    peak_load   = _norm_up(700.0 - eff_runway_p95, 100, 400)
+
+    # MOTOR–COGNITIVE COUPLING (per user's insight): below 500ms runway,
+    # reaction and pattern-comprehension compete for the same cognitive
+    # budget. Simple sparse patterns can still be run on autopilot; DENSE
+    # patterns at short runway become "unreadable" territory because the
+    # brain can't decode + react in the same window.
+    #
+    # Multiplier = 1.0 (comfort) → 2.0 (short-runway AND high-density).
+    # Fires only when BOTH conditions apply — a lone burst at 400ms in an
+    # otherwise sparse map doesn't cross the threshold.
+    peak_nps_5s = getattr(f.density, "peak_nps_5s", 0.0) or 0.0
+    short_runway_intensity = _norm(500.0 - eff_runway_p50, 0.0, 250.0)  # 0 at 500ms → 1 at 250ms
+    density_intensity = _norm(peak_nps_5s, 12.0, 22.0)                   # 0 at 12nps → 1 at 22nps
+    motor_coupling = 1.0 + 1.0 * short_runway_intensity * density_intensity
+
+    fast_load = (55 * runway_load + 45 * peak_load) * motor_coupling
+
+    # SLOW side — more notes on screen = crowding / stack pressure.
+    #   ≤8   comfortable
+    #   14   crowded (1/6 at SV 1.0, or 1/4 at SV ~0.7)
+    #   20   very crowded (1/8 at SV 1.0, or heavy low-SV stacks)
+    stack_load_n = _norm(eff_on_screen, 8.0, 20.0)
+    stack_load = 65 * stack_load_n
 
     return fast_load, stack_load
 
@@ -426,6 +470,7 @@ def rate_map(
     reading_mult: float = 1.0,           # DEPRECATED — use the split multipliers
     reading_fast_mult: float | None = None,
     reading_slow_mult: float | None = None,
+    is_hr: bool = False,                 # HR's aspect-dependent scroll factor
     style: str = "kddk",
 ) -> DimensionRating:
     """Rate the map on the six dimensions.
@@ -466,6 +511,6 @@ def rate_map(
         # slow 1.75×) land at the rating level rather than getting squared
         # by _shape. Sum-then-shape (via _raw_reading) would give 1.56× and
         # 3.06× post-shape from the same mults.
-        reading=(_shape(_raw_reading_split(features)[0]) * reading_fast_mult
-                 + _shape(_raw_reading_split(features)[1]) * reading_slow_mult) * bonus,
+        reading=(_shape(_raw_reading_split(features, is_hr=is_hr)[0]) * reading_fast_mult
+                 + _shape(_raw_reading_split(features, is_hr=is_hr)[1]) * reading_slow_mult) * bonus,
     )
