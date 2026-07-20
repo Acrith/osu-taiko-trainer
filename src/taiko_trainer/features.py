@@ -914,10 +914,19 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
         elif median_v < LOW:
             stacked_flag[i] = 1
 
+    # Denominator is the count of DENSE notes, not the whole map. Both flags
+    # are gated on `local_counts[i] >= density_threshold`, so a share of 1.0
+    # means "every dense note in this map sits inside a sustained fast/slow
+    # neighborhood." Using `n` as the denominator would silently cap both
+    # shares at the density-threshold percentile (~20%), collapsing the
+    # anchor calibration (norm(0.20 → 0.95) can no longer fire).
+    dense_count = sum(1 for c in local_counts if c >= density_threshold)
+    denom = dense_count or 1
+
     return ReadingProfile(
         velocity_dense_p50=_pctile(dense_velocities, 0.50) if dense_velocities else 0.0,
-        sustained_share=sum(sustained_flag) / n,
-        stacked_share=sum(stacked_flag) / n,
+        sustained_share=sum(sustained_flag) / denom,
+        stacked_share=sum(stacked_flag) / denom,
         velocity_p95=_pctile(velocities, 0.95),
     )
 
