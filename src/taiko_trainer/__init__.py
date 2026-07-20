@@ -105,10 +105,11 @@ def main() -> None:
     elif cmd == "migrate":
         # `taiko-trainer migrate --workspace ... --server ... --token ... [--player X] [--dry-run]`
         # Delegates to migrate.main which parses its own args from sys.argv.
+        # NOTE: line 44 above already stripped sys.argv[1] (the "migrate"
+        # subcommand), so at this point sys.argv[1:] is already just the flags.
+        # Setting sys.argv[0] to a descriptive name for nice error messages.
         from .migrate import main as migrate_main
-        # migrate_main uses argparse against sys.argv[1:]; strip off "migrate"
-        # so argparse sees the flags as if it were called directly.
-        sys.argv = ["taiko-trainer migrate"] + sys.argv[2:]
+        sys.argv = ["taiko-trainer migrate"] + sys.argv[1:]
         sys.exit(migrate_main())
 
     elif cmd == "player":
