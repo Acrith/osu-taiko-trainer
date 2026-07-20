@@ -791,13 +791,30 @@ def create_app(workspace: str) -> FastAPI:
     # --- upload ---------------------------------------------------------
 
     @app.get("/api/uploads/active")
-    def uploads_active():
+    def uploads_active(
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
         """List uploads that are still in progress or recently completed.
-        The base template polls this to render the floating status tray."""
+        The base template polls this to render the floating status tray.
+
+        In web mode: filter to the session user's own uploads only. Anon
+        users get an empty list. Local mode: return everything (single
+        implicit user, no isolation needed)."""
+        # Determine which uploads this viewer is allowed to see.
+        viewer_uid: int | None = None
+        if auth_module.is_web_mode():
+            viewer_uid = auth_module.read_session_cookie(session)
+            # Anonymous viewer in web mode: no uploads to show.
+            if viewer_uid is None:
+                return JSONResponse([])
+
         cutoff = time.time() - 15  # keep done/error entries visible 15s
         summary = []
         with _UPLOAD_LOCK:
             for tid, entry in list(_UPLOAD_TASKS.items()):
+                # Web mode: skip entries owned by other users.
+                if auth_module.is_web_mode() and entry.get("owner_uid") != viewer_uid:
+                    continue
                 if entry["stage"] not in ("done", "error"):
                     summary.append({"id": tid, **entry})
                 elif entry.get("updated_at", 0) >= cutoff:
@@ -1048,6 +1065,13 @@ def create_app(workspace: str) -> FastAPI:
                 )
 
         task_id = uuid.uuid4().hex[:10]
+        # In web mode, tag the task with its owner so /api/uploads/active
+        # can filter — otherwise the floating tray shows every user's
+        # in-flight uploads to everyone on the site. Local mode leaves
+        # this None (single implicit user, no isolation needed).
+        owner_uid: int | None = None
+        if auth_module.is_web_mode():
+            owner_uid = auth_module.read_session_cookie(session)
         with _UPLOAD_LOCK:
             _UPLOAD_TASKS[task_id] = {
                 "stage": "queued", "label": "Queued", "pct": 0, "note": "",
@@ -1055,6 +1079,7 @@ def create_app(workspace: str) -> FastAPI:
                 "created_at": time.time(), "updated_at": time.time(),
                 "result": None, "error": None,
                 "redirect": None,
+                "owner_uid": owner_uid,
             }
 
         def _worker():
