@@ -122,6 +122,7 @@ def judge_replay(
     beatmap: TaikoBeatmap,
     replay: TaikoReplay,
     od_mult: float = 1.0,
+    lazer_mode: bool = False,
 ) -> JudgedReplay:
     """Pair map notes with replay key-downs and classify each note.
 
@@ -136,7 +137,14 @@ def judge_replay(
     music-time window equals the NM music-time window. Pass the ORIGINAL
     (unscaled) beatmap; do not call `apply_mods_to_beatmap` before this.
     (`apply_mods_to_beatmap` is still the right thing for feature
-    extraction, which needs the wall-clock experience.)"""
+    extraction, which needs the wall-clock experience.)
+
+    `lazer_mode`: when True, follow osu!lazer's rules — no notelock.
+    A wrong-color press within a note's window is ignored (doesn't
+    consume the note attempt); the player can still hit the note with
+    the correct color as long as they land within the miss window.
+    Stable's behavior (first-press-wins, wrong-color = bad = miss)
+    is the default."""
     windows = JudgmentWindows.from_od(
         beatmap.difficulty.overall_difficulty,
         od_mult=od_mult,
@@ -168,47 +176,89 @@ def judge_replay(
             ))
             continue
 
-        k_time, k_input = events[cursor]
-        delta = k_time - note_time
+        if lazer_mode:
+            # LAZER: scan for the FIRST correct-color press within the miss
+            # window. Wrong-color presses are ignored (no notelock).
+            scan = cursor
+            hit_scan = -1
+            while scan < n_events:
+                st, sin = events[scan]
+                if st - note_time > windows.miss:
+                    break
+                s_is_don = bool(sin & TaikoInput.dons())
+                s_is_kat = bool(sin & TaikoInput.kats())
+                s_color_ok = (s_is_don and note_is_don) or (s_is_kat and note_is_kat)
+                if s_color_ok:
+                    hit_scan = scan
+                    break
+                scan += 1
 
-        if delta > windows.miss:
-            # The first event chronologically after `earliest` is past the miss
-            # window — no press for this note. MISS, cursor stays put.
+            if hit_scan < 0:
+                # No correct-color press within the window → MISS.
+                judgments.append(Judgment(
+                    note=note, verdict=Verdict.MISS,
+                    hit_time_ms=None, hit_delta_ms=None, hit_input=None,
+                ))
+                # Cursor stays where it is — wrong-color events between
+                # notes get re-scanned (and re-skipped) for the next note.
+                continue
+
+            k_time, k_input = events[hit_scan]
+            delta = k_time - note_time
+            abs_delta = abs(delta)
+            if abs_delta < windows.great:
+                verdict = Verdict.GREAT
+            elif abs_delta < windows.ok:
+                verdict = Verdict.OK
+            else:
+                verdict = Verdict.MISS
+
             judgments.append(Judgment(
-                note=note, verdict=Verdict.MISS,
-                hit_time_ms=None, hit_delta_ms=None, hit_input=None,
+                note=note, verdict=verdict,
+                hit_time_ms=k_time, hit_delta_ms=delta, hit_input=k_input,
             ))
-            continue
-
-        # First press within the window "attempts" this note. In real osu!taiko
-        # you can't rewrite an early miss with a later great — the first press
-        # commits. If wrong color, it's a bad (MISS) that still consumes the note.
-        k_is_don = bool(k_input & TaikoInput.dons())
-        k_is_kat = bool(k_input & TaikoInput.kats())
-        color_ok = (k_is_don and note_is_don) or (k_is_kat and note_is_kat)
-
-        abs_delta = abs(delta)
-        if not color_ok:
-            verdict = Verdict.MISS
-        elif abs_delta < windows.great:
-            verdict = Verdict.GREAT
-        elif abs_delta < windows.ok:
-            verdict = Verdict.OK
+            cursor = hit_scan + 1
         else:
-            verdict = Verdict.MISS
+            # STABLE: first press within window commits — wrong color = miss.
+            k_time, k_input = events[cursor]
+            delta = k_time - note_time
 
-        judgments.append(Judgment(
-            note=note, verdict=verdict,
-            hit_time_ms=k_time, hit_delta_ms=delta, hit_input=k_input,
-        ))
-        cursor += 1
+            if delta > windows.miss:
+                # First event past `earliest` is beyond the miss window — MISS,
+                # cursor stays put (the event probably belongs to a later note).
+                judgments.append(Judgment(
+                    note=note, verdict=Verdict.MISS,
+                    hit_time_ms=None, hit_delta_ms=None, hit_input=None,
+                ))
+                continue
+
+            k_is_don = bool(k_input & TaikoInput.dons())
+            k_is_kat = bool(k_input & TaikoInput.kats())
+            color_ok = (k_is_don and note_is_don) or (k_is_kat and note_is_kat)
+
+            abs_delta = abs(delta)
+            if not color_ok:
+                verdict = Verdict.MISS
+            elif abs_delta < windows.great:
+                verdict = Verdict.GREAT
+            elif abs_delta < windows.ok:
+                verdict = Verdict.OK
+            else:
+                verdict = Verdict.MISS
+
+            judgments.append(Judgment(
+                note=note, verdict=verdict,
+                hit_time_ms=k_time, hit_delta_ms=delta, hit_input=k_input,
+            ))
+            cursor += 1
 
         # BIG NOTE geki bonus: if we hit a big note successfully, additional
         # same-color presses within its OK window are the second-hand press
         # (awards geki, doesn't consume another note). Skip them so they don't
         # leak into the next close-by note. Small notes have no geki mechanic —
-        # extras cascade into the next note per real game behavior.
-        if verdict is not Verdict.MISS and note.note_type.is_big:
+        # extras cascade into the next note per real game behavior. Applies
+        # in both stable and lazer.
+        if judgments[-1].verdict is not Verdict.MISS and note.note_type.is_big:
             geki_end = note_time + int(round(windows.ok))
             while cursor < n_events:
                 next_time, next_input = events[cursor]

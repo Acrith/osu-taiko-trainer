@@ -179,14 +179,15 @@ def refresh_ratings(workspace: str) -> None:
                     if (mods.alters_map or style_alters) else None
                 )
                 # Judge against ORIGINAL bm — see judge_replay's docstring for why.
-                judged = judge_replay(bm, rp, od_mult=mods.od_mult)
+                # lazer_mode: skip notelock so judged counts match the game's
+                # reported values and miss classification runs on real misses.
+                from .osr_parser import detect_lazer_replay as _det_lazer
+                _is_lazer = _det_lazer(bytes(r["content"]))
+                judged = judge_replay(bm, rp, od_mult=mods.od_mult, lazer_mode=_is_lazer)
                 classes = classify_failures(judged, bm, base_feats)
                 summary = summarize_failures(classes)
                 miss_patterns = extract_miss_patterns(classes, bm.hittable())
                 cheese = detect_cheese(judged)
-                # Detect lazer so update_replay_judgment stores reported counts.
-                from .osr_parser import detect_lazer_replay as _det_lazer
-                _is_lazer = _det_lazer(bytes(r["content"]))
                 update_replay_judgment(
                     conn, r["id"], judged, summary, cheese, miss_patterns,
                     mods_bitfield=mods.bitfield,

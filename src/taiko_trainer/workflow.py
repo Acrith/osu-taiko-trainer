@@ -426,7 +426,11 @@ def add_replay(
     _report("judge", note=f"running per-note judgment ({mods.label})")
     # Judge against the ORIGINAL beatmap: osu! replay events are in music-time,
     # same clock as the unscaled note times. See judge_replay's docstring.
-    judged = judge_replay(bm, rp, od_mult=mods.od_mult)
+    # Detect lazer → use lazer rules (no notelock) so judged counts match the
+    # game's reported values and miss classification runs on real misses.
+    from .osr_parser import detect_lazer_replay
+    _is_lazer = detect_lazer_replay(replay_content)
+    judged = judge_replay(bm, rp, od_mult=mods.od_mult, lazer_mode=_is_lazer)
     _report("classify", note=f"classifying {judged.count_miss} misses")
     # Classification consumes judged.judgments (note refs point to bm), so it
     # must line up with the SAME timeline — pass bm + its features, not play_bm.
@@ -438,10 +442,10 @@ def add_replay(
     cheese = detect_cheese(judged)
 
     _report("store", note="writing to database")
-    # Detect lazer so insert_replay stores reported counts instead of our
-    # stable-rules judgment (lazer removes notelock → our misses > actual).
-    from .osr_parser import detect_lazer_replay
-    _is_lazer = detect_lazer_replay(replay_content)
+    # is_lazer was detected above for judge_replay; still pass it so the
+    # DB row is tagged and the LAZER pill renders. The reported-count
+    # override in insert_replay is now a safety-net — with lazer_mode
+    # judgment, judged counts should already match reported.
     replay_id = insert_replay(
         plays, rp, judged, target_md5, replay_content,
         classification=summary,

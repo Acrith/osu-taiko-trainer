@@ -3626,8 +3626,29 @@ def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
                     f'<span class="count">{n}  ({pct:.1f}%)</span>'
                     f'</div>'
                 )
+    # Lazer replays: classifier runs on our lazer_mode judgment (no notelock),
+    # which approximates lazer's rules but doesn't exactly match — lazer's
+    # miss policy is more nuanced than pure "wrong-color = ignore". Numbers
+    # are approximate; categories still reveal what patterns cause misses.
+    _causes_note = ""
+    if (row.get("is_lazer") or 0) and causes_html:
+        stored_miss = row.get("count_miss") or 0
+        try:
+            _classified_total = sum(_json.loads(row["classification_json"]).values())
+        except Exception:
+            _classified_total = 0
+        if _classified_total != stored_miss:
+            _causes_note = (
+                f'<p class="hint" style="margin: -6px 0 10px;">'
+                f'Lazer replay: {_classified_total} misses categorized here vs '
+                f'{stored_miss} the game counted. Our judgment approximates '
+                f'lazer\'s rules (no notelock) but isn\'t a perfect match; the '
+                f'category proportions still show which patterns trip you up.'
+                f'</p>'
+            )
     causes_section = (
-        f'<section class="card"><h2>Miss causes (this replay)</h2>{causes_html}</section>'
+        f'<section class="card"><h2>Miss causes (this replay)</h2>'
+        f'{_causes_note}{causes_html}</section>'
         if causes_html else ""
     )
 
