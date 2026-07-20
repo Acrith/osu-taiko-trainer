@@ -728,7 +728,8 @@ def top_users_by_skill(
         cat = open_catalog(ws)
         users = cat.execute(
             """
-            SELECT id, osu_username, osu_avatar_url, osu_country_code, osu_global_rank
+            SELECT id, osu_username, osu_avatar_url, osu_cover_url,
+                   osu_country_code, osu_global_rank
             FROM users WHERE profile_public = 1
             """
         ).fetchall()
@@ -761,6 +762,7 @@ def top_users_by_skill(
             row = {
                 "osu_username": u["osu_username"],
                 "osu_avatar_url": u["osu_avatar_url"],
+                "osu_cover_url": u["osu_cover_url"],
                 "osu_country_code": u["osu_country_code"],
                 "osu_global_rank": u["osu_global_rank"],
                 "replays": int(snap["replays_used"]),

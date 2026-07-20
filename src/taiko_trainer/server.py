@@ -3962,8 +3962,11 @@ def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> 
             for d in chip_dims
         )
         other_dims_html = f'<div class="lb-otherdims">{chips}</div>'
-    # Per-row style var carries the avatar URL for the blurred bg wash.
-    bg_style = f'style="--av-url: url({av!r})"' if av else ""
+    # Per-row style var carries the profile COVER URL for the blurred bg wash
+    # (same splashart shown on the player's public profile hero). Falls back
+    # to the avatar if the user hasn't set a cover.
+    cover = u.get("osu_cover_url") or av
+    bg_style = f'style="--cover-url: url({cover!r})"' if cover else ""
     return f"""
     <a class="{row_class}" href="/u/{u['osu_username']}" {bg_style}>
       <div class="lb-card-rank">{_rank_medal(rank)}</div>
@@ -4103,19 +4106,26 @@ def _leaderboards_css() -> str:
       text-decoration: none; font-family: var(--font-mono);
       min-height: 42px;
     }
-    /* Subtle avatar bg wash. Placed behind everything via ::before + z-index. */
+    /* Row background = player's profile cover (splashart from osu!), lightly
+       blurred so the row text stays readable but the art still reads. Same
+       image the player has on their public /u/ profile hero. */
     .lb-card::before {
       content: ""; position: absolute; inset: 0;
-      background-image: var(--av-url); background-size: cover; background-position: center;
-      filter: blur(28px) saturate(1.4);
-      opacity: 0.08; z-index: 0; pointer-events: none;
+      background-image: var(--cover-url); background-size: cover; background-position: center;
+      filter: blur(6px) saturate(1.1);
+      opacity: 0.35; z-index: 0; pointer-events: none;
+    }
+    /* Dark scrim keeps text legible over bright covers. */
+    .lb-card::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(90deg, rgba(15,17,20,0.55) 0%, rgba(15,17,20,0.35) 60%, rgba(15,17,20,0.55) 100%);
+      z-index: 0; pointer-events: none;
     }
     .lb-card > * { position: relative; z-index: 1; }
     .lb-card:hover {
-      border-color: var(--rule);
-      background: rgba(255,255,255,0.03); text-decoration: none;
+      border-color: var(--rule); text-decoration: none;
     }
-    .lb-card:hover::before { opacity: 0.14; }
+    .lb-card:hover::before { opacity: 0.55; }
 
     .lb-card-rank { grid-area: rank; text-align: center; }
     .lb-card .lb-avatar, .lb-card .lb-avatar-blank { grid-area: avatar; }
