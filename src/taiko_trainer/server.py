@@ -831,7 +831,7 @@ def create_app(workspace: str) -> FastAPI:
             Path(tmp_path).unlink(missing_ok=True)
         # Mod-aware: HR/EZ change the effective windows the player saw.
         from .mods import parse_mods as _pmods
-        _play_mods = _pmods(row.get("mods_bitfield") or rp.meta.mods or 0)
+        _play_mods = _pmods(row["mods_bitfield"] or rp.meta.mods or 0)
         judged = judge_replay(bm, rp, od_mult=_play_mods.od_mult)
         return _render_inspector(dict(row), player, judged, rp)
 
@@ -897,7 +897,7 @@ def create_app(workspace: str) -> FastAPI:
                     # etc.), and the timing histogram's window bands should
                     # reflect the effective OD (HR / EZ).
                     from .mods import parse_mods as _pmods, apply_mods_to_beatmap as _amod
-                    _play_mods = _pmods(row.get("mods_bitfield") or 0)
+                    _play_mods = _pmods(row["mods_bitfield"] or 0)
                     play_bm = _amod(bm, _play_mods)
                     features = extract_features(play_bm)
                     # Timing histogram is cheap (~10-50ms per replay).
@@ -912,7 +912,15 @@ def create_app(workspace: str) -> FastAPI:
                     # judge_replay's docstring), but pass od_mult so windows
                     # match what the player actually saw.
                     judged = judge_replay(bm, rp, od_mult=_play_mods.od_mult)
-                except Exception:
+                except Exception as e:
+                    # Silent-swallow used to hide the sqlite3.Row.get()
+                    # AttributeError, which made the features panel + timing
+                    # histogram silently disappear on every replay page.
+                    # Log so future silent failures show up in `docker logs`.
+                    import traceback
+                    print(f"[replay {replay_id}] feature/judge extraction failed: {e!r}",
+                          flush=True)
+                    traceback.print_exc()
                     features = None
                     judged = None
             # Lazy backfill: fetch star rating from osu! API if we don't
