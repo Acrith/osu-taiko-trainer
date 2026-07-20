@@ -3937,22 +3937,22 @@ def _rank_medal(rank: int) -> str:
 
 
 def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> str:
-    """One leaderboard row as a card (not a table row). Card layout means the
-    value + other-dims cluster on the right stays visually aligned with the
-    player info cluster on the left regardless of how many dim chips there
-    are. Works for both the overview (show_all_dims=False, compact) and the
-    full per-dim ranking (show_all_dims=True, expanded).
+    """One leaderboard row. Fixed-column grid keeps the value + chips block
+    aligned across all rows regardless of name length. Avatar doubles as a
+    subtle blurred background wash for personality.
 
-    `dim` can be a real dim or 'total' (sum of six). When 'total', the
-    other-dims chips show ALL six dims (no dim is excluded)."""
+    `dim` can be a real dim or 'total' (sum of six). When 'total', chips
+    show ALL six dims; otherwise the other five dims (excluding the one
+    the column ranks on)."""
     av = u.get("osu_avatar_url") or ""
     country = (u.get("osu_country_code") or "").upper()
     main_val = int(u[dim])
     replays = u.get("replays", 0)
     country_html = f'<span class="lb-country" title="{country}">{country}</span>' if country else ""
     other_dims_html = ""
+    row_class = "lb-card"
     if show_all_dims:
-        # For total: show all 6 dims. For a specific dim: show the other 5.
+        row_class += " lb-card-wide"
         chip_dims = _LEADERBOARD_DIMS if dim == "total" else [d for d in _LEADERBOARD_DIMS if d != dim]
         chips = "".join(
             f'<span class="lb-otherdim" title="{d}: {int(u[d]):,}">'
@@ -3962,8 +3962,10 @@ def _lb_user_card(rank: int, u: dict, dim: str, show_all_dims: bool = False) -> 
             for d in chip_dims
         )
         other_dims_html = f'<div class="lb-otherdims">{chips}</div>'
+    # Per-row style var carries the avatar URL for the blurred bg wash.
+    bg_style = f'style="--av-url: url({av!r})"' if av else ""
     return f"""
-    <a class="lb-card" href="/u/{u['osu_username']}">
+    <a class="{row_class}" href="/u/{u['osu_username']}" {bg_style}>
       <div class="lb-card-rank">{_rank_medal(rank)}</div>
       {'<img class="lb-avatar" src="' + av + '" alt="">' if av else '<span class="lb-avatar-blank"></span>'}
       <div class="lb-card-name">
@@ -4085,63 +4087,102 @@ def _leaderboards_css() -> str:
     .lb-tab:hover { border-color: var(--accent-soft); color: var(--ink); text-decoration: none; }
     .lb-tab.active { border-color: var(--accent); color: var(--accent); }
 
-    /* Card-based leaderboard row. Grid layout keeps the value + chip cluster
-       right-anchored regardless of chip count, and the player info stays
-       left-anchored — no more table-column drift. */
-    .lb-list { display: flex; flex-direction: column; gap: 6px; }
+    /* Leaderboard row — thin, slick, fixed column widths so everything
+       aligns vertically across rows regardless of name length. Avatar
+       doubles as a subtle blurred background wash for personality. */
+    .lb-list { display: flex; flex-direction: column; gap: 3px; }
+
+    /* Base (compact) row — used in the per-dim column panels: rank | avatar | name | value */
     .lb-card {
+      position: relative; overflow: hidden;
       display: grid; align-items: center;
-      grid-template-columns: 30px 32px 1fr auto;
+      grid-template-columns: 24px 30px minmax(0, 1fr) 84px;
       grid-template-areas: "rank avatar name value";
-      gap: 12px; padding: 8px 12px; border-radius: 4px;
-      background: transparent; border: 1px solid transparent; text-decoration: none;
-      font-family: var(--font-mono);
+      gap: 10px; padding: 5px 10px; border-radius: 3px;
+      background: transparent; border: 1px solid transparent;
+      text-decoration: none; font-family: var(--font-mono);
+      min-height: 42px;
     }
-    .lb-card:hover { border-color: var(--rule); background: rgba(255,255,255,0.02); text-decoration: none; }
+    /* Subtle avatar bg wash. Placed behind everything via ::before + z-index. */
+    .lb-card::before {
+      content: ""; position: absolute; inset: 0;
+      background-image: var(--av-url); background-size: cover; background-position: center;
+      filter: blur(28px) saturate(1.4);
+      opacity: 0.08; z-index: 0; pointer-events: none;
+    }
+    .lb-card > * { position: relative; z-index: 1; }
+    .lb-card:hover {
+      border-color: var(--rule);
+      background: rgba(255,255,255,0.03); text-decoration: none;
+    }
+    .lb-card:hover::before { opacity: 0.14; }
+
     .lb-card-rank { grid-area: rank; text-align: center; }
     .lb-card .lb-avatar, .lb-card .lb-avatar-blank { grid-area: avatar; }
-    .lb-card-name { grid-area: name; min-width: 0; }
-    .lb-card-value { grid-area: value; font-size: 20px; font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; min-width: 80px; }
-
-    .lb-name-row { display: flex; align-items: center; gap: 8px; }
-    .lb-name { color: var(--ink); font-weight: 500; font-size: 14px; }
-    .lb-card:hover .lb-name { color: var(--accent); }
-    .lb-sub { font-size: 10px; color: var(--ink-faint); margin-top: 2px; }
-
-    /* Country as a small badge next to the name */
-    .lb-country {
-      display: inline-block; font-size: 9px; letter-spacing: 0.1em;
-      padding: 2px 6px; border: 1px solid var(--rule); border-radius: 3px;
-      color: var(--ink-muted); font-family: var(--font-mono); font-weight: 500;
-      background: var(--panel);
+    .lb-card-name { grid-area: name; min-width: 0; overflow: hidden; }
+    .lb-card-value {
+      grid-area: value; font-size: 17px; font-weight: 500; color: var(--ink);
+      font-variant-numeric: tabular-nums; text-align: right; letter-spacing: -0.01em;
     }
 
-    .lb-avatar, .lb-avatar-blank { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 1px solid var(--rule); flex-shrink: 0; }
+    /* Name + country pinned in one row; ellipsis prevents pushing other columns */
+    .lb-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .lb-name {
+      color: var(--ink); font-weight: 500; font-size: 13px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+    }
+    .lb-card:hover .lb-name { color: var(--accent); }
+    .lb-sub { font-size: 9px; color: var(--ink-faint); margin-top: 1px; letter-spacing: 0.04em; }
+
+    .lb-country {
+      flex-shrink: 0;
+      display: inline-block; font-size: 8px; letter-spacing: 0.1em;
+      padding: 1px 5px; border: 1px solid var(--rule); border-radius: 2px;
+      color: var(--ink-muted); font-family: var(--font-mono); font-weight: 500;
+      background: rgba(0,0,0,0.25);
+    }
+
+    .lb-avatar, .lb-avatar-blank { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; border: 1px solid rgba(255,255,255,0.08); flex-shrink: 0; }
     .lb-avatar-blank { background: var(--panel); }
 
-    .lb-rank { color: var(--ink-faint); font-size: 12px; font-weight: 500; }
-    .lb-medal { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 50%; font-weight: 700; font-size: 11px; }
+    .lb-rank { color: var(--ink-faint); font-size: 11px; font-weight: 500; }
+    .lb-medal { display: inline-block; width: 20px; height: 20px; line-height: 20px; text-align: center; border-radius: 50%; font-weight: 700; font-size: 10px; }
     .lb-medal.gold { background: linear-gradient(180deg, #f0d475, #d4af37); color: #3a2a00; }
     .lb-medal.silver { background: linear-gradient(180deg, #dcdcdc, #a8a8a8); color: #1a1a1a; }
     .lb-medal.bronze { background: linear-gradient(180deg, #d29c6a, #a06a3a); color: #1a1a00; }
 
-    /* Full-dim page: cards get an extra area for other-dim chips, wrapping
-       below the main row on narrow viewports. */
-    .lb-list-full .lb-card {
-      grid-template-columns: 30px 32px 1fr auto auto;
+    /* WIDE variant — for the Overall panel + full-dim page.
+       Chips live in their own fixed-width column so the value column
+       still lines up exactly across rows. Chip block is a 3×2 grid. */
+    .lb-card-wide {
+      grid-template-columns: 24px 30px minmax(0, 1fr) 84px 232px;
       grid-template-areas: "rank avatar name value chips";
     }
-    .lb-otherdims { grid-area: chips; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; margin-left: 12px; }
-    .lb-otherdim { display: inline-flex; gap: 4px; font-size: 10px; padding: 2px 8px; border: 1px solid var(--rule); border-radius: 3px; background: var(--panel); }
-    .lb-otherdim-k { color: var(--ink-faint); letter-spacing: 0.06em; }
-    .lb-otherdim-v { color: var(--ink); font-variant-numeric: tabular-nums; }
+    .lb-otherdims {
+      grid-area: chips;
+      display: grid;
+      grid-template-columns: repeat(3, 72px);
+      grid-auto-rows: 1fr;
+      gap: 3px;
+      justify-content: end; align-content: center;
+    }
+    .lb-otherdim {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 4px; font-size: 9px; padding: 2px 6px;
+      border: 1px solid var(--rule); border-radius: 2px;
+      background: rgba(0,0,0,0.2);
+    }
+    .lb-otherdim-k { color: var(--ink-faint); letter-spacing: 0.06em; text-transform: uppercase; }
+    .lb-otherdim-v { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 500; }
 
     @media (max-width: 760px) {
-      .lb-list-full .lb-card {
-        grid-template-columns: 30px 32px 1fr auto;
-        grid-template-areas: "rank avatar name value" ".    .      chips chips";
+      .lb-card-wide {
+        grid-template-columns: 24px 30px minmax(0, 1fr) 84px;
+        grid-template-areas:
+          "rank avatar name  value"
+          ".    .      chips chips";
       }
-      .lb-otherdims { justify-content: flex-start; margin-left: 0; margin-top: 6px; }
+      .lb-otherdims { justify-content: start; margin-top: 4px; }
     }
 
     .lb-empty { color: var(--ink-faint); text-align: center; padding: 20px; font-family: var(--font-mono); font-size: 12px; }
