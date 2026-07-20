@@ -288,7 +288,20 @@ def create_app(workspace: str) -> FastAPI:
         # If the user just created a token, the raw value comes in via query
         # param (?created=<raw>). We show it once and never persist it.
         new_token = request.query_params.get("created", "")
-        return HTMLResponse(_render_tokens_page(user, tokens, new_token))
+        # Resolve current playstyle from the per-player DB (default 'unknown'
+        # if no per-player DB exists yet).
+        player_name = find_player_name_for_user(workspace, uid)
+        current_style = "unknown"
+        if player_name:
+            pconn = open_plays(workspace, player_name)
+            prow = pconn.execute(
+                "SELECT style FROM player_info WHERE name = ?", (player_name,)
+            ).fetchone()
+            pconn.close()
+            if prow and prow["style"]:
+                current_style = prow["style"]
+        flash_ok = request.query_params.get("ok", "")
+        return HTMLResponse(_render_tokens_page(user, tokens, new_token, current_style, flash_ok))
 
     @app.post("/settings/tokens")
     def create_token(
@@ -365,6 +378,44 @@ def create_app(workspace: str) -> FastAPI:
             flush=True,
         )
         return resp
+
+    @app.post("/settings/style")
+    def set_style(
+        style: str = Form(...),
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """Set the user's playstyle on their per-player DB. Style drives
+        stamina + technical scoring (KDDK vs DDKK/KKDD paths) so this needs
+        to trigger a refresh of the user's eff-ratings + snapshot to make
+        the new numbers actually appear."""
+        if not auth_module.is_web_mode():
+            raise HTTPException(status_code=404)
+        uid = auth_module.read_session_cookie(session)
+        if uid is None:
+            return RedirectResponse(url="/login", status_code=302)
+        if style not in ("kddk", "ddkk", "kkdd"):
+            return HTMLResponse(_render_error(f"invalid style: {style!r}"), status_code=400)
+
+        player_name = find_player_name_for_user(workspace, uid)
+        if not player_name:
+            # User has no per-player DB yet (no plays uploaded). Nothing to
+            # attach the style to; direct them to upload first.
+            return RedirectResponse(url="/upload", status_code=303)
+
+        conn = open_plays(workspace, player_name)
+        upsert_player(conn, player_name, style=style)
+        conn.close()
+
+        # Refresh so the new style's scoring recomputes eff-ratings + snapshot.
+        # Small workspaces (personal profile) — this is fast.
+        from .ingest import refresh_ratings
+        try:
+            refresh_ratings(str(workspace))
+        except Exception as e:
+            print(f"[set_style] refresh failed after style change: {e}", flush=True)
+            # Non-fatal; the style is set, refresh can be re-run manually.
+
+        return RedirectResponse(url="/settings/tokens?ok=style-set", status_code=303)
 
     @app.post("/settings/profile-visibility")
     def set_profile_visibility(
@@ -4208,7 +4259,10 @@ def _render_web_landing(recent_users: list[dict]) -> str:
     return _html_page("taiko-trainer", body)
 
 
-def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
+def _render_tokens_page(
+    user: dict, tokens: list[dict], new_raw: str,
+    current_style: str = "unknown", flash_ok: str = "",
+) -> str:
     """Settings page for managing API tokens. Two states:
 
     - Regular view: form to create a new token, list of existing tokens
@@ -4254,6 +4308,47 @@ def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
                 f'</tr>'
             )
 
+    # Playstyle picker — must be set before scoring makes sense
+    style_flash = ""
+    if flash_ok == "style-set":
+        style_flash = '<div class="flash flash-ok">✓ playstyle updated · ratings refreshed</div>'
+    style_options_html = ""
+    for value, label, desc in (
+        ("kddk", "KDDK", "outer keys = kat, inner keys = don. Alternates L-R regardless of color. The most common competitive playstyle."),
+        ("ddkk", "DDKK", "left hand = all Dons, right hand = all Kats. Long mono-color runs are single-hand stamina."),
+        ("kkdd", "KKDD", "mirror of DDKK — left hand = all Kats, right hand = all Dons."),
+    ):
+        checked = "checked" if current_style == value else ""
+        style_options_html += (
+            f'<label class="style-opt">'
+            f'<input type="radio" name="style" value="{value}" {checked} required>'
+            f'<div><strong>{label}</strong><span class="hint">{desc}</span></div>'
+            f'</label>'
+        )
+    unset_warning = ""
+    if current_style == "unknown":
+        unset_warning = (
+            '<div class="unset-warning">⚠  Your playstyle isn\'t set yet — '
+            'scoring uses KDDK by default until you pick one below. Skill '
+            'vector will refresh with your style\'s cost model after you save.</div>'
+        )
+    style_section_html = f"""
+  <section class="card">
+    <h2>Playstyle</h2>
+    <p class="hint">
+      Which physical fingering do you use? This drives stamina + technical
+      scoring — DDKK/KKDD players get a color-to-hand cost model, KDDK gets
+      strict alternation with chunk-misalignment friction.
+    </p>
+    {unset_warning}
+    {style_flash}
+    <form method="post" action="/settings/style" class="style-form">
+      <div class="style-opts">{style_options_html}</div>
+      <button type="submit" class="style-btn">Save playstyle</button>
+    </form>
+  </section>
+"""
+
     current_public = bool(user.get("profile_public", 1))
     profile_toggle_html = f"""
   <section class="card">
@@ -4278,6 +4373,8 @@ def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
   <section class="eyebrow-row">
     <span class="eyebrow"><a href="/u/{user['osu_username']}" style="color: var(--ink-muted);">← {user['osu_username']}</a>  ·  settings</span>
   </section>
+
+  {style_section_html}
 
   {profile_toggle_html}
 
@@ -4347,6 +4444,18 @@ def _render_tokens_page(user: dict, tokens: list[dict], new_raw: str) -> str:
     .visibility-current strong.is-private {{ color: var(--miss); letter-spacing: 0.14em; }}
     .visibility-btn {{ padding: 8px 20px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); border-radius: 3px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; }}
     .visibility-btn:hover {{ border-color: var(--accent); color: var(--accent); }}
+    .style-opts {{ display: grid; gap: 10px; margin-top: 14px; }}
+    .style-opt {{ display: flex; gap: 12px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; align-items: flex-start; }}
+    .style-opt:hover {{ border-color: var(--accent-soft); background: rgba(255,255,255,0.02); }}
+    .style-opt input {{ margin-top: 3px; }}
+    .style-opt strong {{ display: block; font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.12em; color: var(--ink); margin-bottom: 4px; }}
+    .style-opt .hint {{ font-size: 12px; margin: 0; }}
+    .style-opt input:checked ~ div strong {{ color: var(--accent); }}
+    .style-opt:has(input:checked) {{ border-color: var(--accent); background: rgba(232, 100, 40, 0.05); }}
+    .style-btn {{ margin-top: 14px; padding: 10px 28px; background: var(--accent); color: white; border: none; border-radius: 3px; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; }}
+    .style-btn:hover {{ opacity: 0.9; }}
+    .unset-warning {{ margin-top: 12px; padding: 10px 14px; background: rgba(232, 164, 58, 0.10); border: 1px solid rgba(232, 164, 58, 0.4); border-radius: 4px; color: #e8a43a; font-family: var(--font-mono); font-size: 12px; }}
+    .flash.flash-ok {{ margin-top: 12px; padding: 10px 14px; background: rgba(103, 194, 88, 0.10); border: 1px solid rgba(103, 194, 88, 0.4); border-radius: 4px; color: var(--great); font-family: var(--font-mono); font-size: 12px; }}
     .danger-card {{ border-color: var(--miss); }}
     .danger-details {{ margin-top: 12px; }}
     .danger-details summary {{ cursor: pointer; color: var(--ink-muted); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; }}
