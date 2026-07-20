@@ -816,7 +816,12 @@ class ReadingProfile:
     react to. It's roughly `BPM × SV_multiplier` on the note — a fast SV at
     low BPM feels similar to a slow SV at high BPM. This is DISTINCT from
     gimmick: gimmick captures chaotic/unpredictable SV, reading captures a
-    consistent-but-fast baseline scroll that just needs faster reaction.
+    consistent scroll load that just needs faster reaction (fast side) or
+    stack disambiguation (slow side).
+
+    Reading is a two-sided pressure: fast scroll AND slow scroll are both
+    harder than the middle comfort band. Middle = ~150-280 units (BPM×SV).
+    Below ~150 notes visually stack, above ~280 they fly.
 
     velocity_dense_p50  MEDIAN scroll velocity in dense stretches (top ~20%
                         NPS windows) — the *sustained* scroll the player has
@@ -824,21 +829,26 @@ class ReadingProfile:
                         SV-variance maps have p50 well below p95, and it's
                         the p50 that reflects reading load (the p95 spikes
                         are gimmick moments, not reading pressure).
-    sustained_share     fraction of hittable notes where scroll velocity
-                        SUSTAINS above 280 for a ≥400ms window. A single
-                        note at SV=2.5 doesn't count, but a whole section
-                        at HR-level scroll does.
+    sustained_share     fraction of hittable notes whose ±200ms neighborhood
+                        median velocity is SUSTAINED ABOVE 280 (fast-scroll
+                        pressure). A single SV=2.5 spike doesn't count.
+    stacked_share       fraction of hittable notes whose ±200ms neighborhood
+                        median velocity is SUSTAINED BELOW 150 (stack
+                        pressure — notes visually pile up, hard to read
+                        order + timing). Symmetric to sustained_share for
+                        the low-scroll side.
     velocity_p95        overall 95th-percentile scroll velocity (unfiltered).
                         Kept for reference / diagnostics, not scored.
     """
     velocity_dense_p50: float
     sustained_share: float
+    stacked_share: float
     velocity_p95: float
 
 
 def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
     if not hittable:
-        return ReadingProfile(0.0, 0.0, 0.0)
+        return ReadingProfile(0.0, 0.0, 0.0, 0.0)
 
     # Per-note scroll velocity, clamped so SV=0 (invisible/gimmick) doesn't
     # zero out and drag the percentile down.
@@ -868,12 +878,15 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
         idx = min(len(s) - 1, int(p * len(s)))
         return s[idx]
 
-    # Sustained-fast-scroll share: fraction of notes whose ±200ms neighborhood
-    # (~400ms sustained window) is ALSO above the 280 threshold. A lone SV=2.5
-    # gimmick note doesn't count — its neighbors are back at normal scroll.
-    # Only stretches where the scroll consistently holds above 280 fire this.
+    # Two-sided sustained-scroll flags. Fast-side (>280) captures the classic
+    # reading-pressure case: notes fly by. Slow-side (<150) captures stack
+    # pressure: notes visually pile up because scroll doesn't clear them
+    # before the next lands. Both are hard; the comfort band is ~150-280
+    # (roughly bpm × 1.0 SV at typical taiko tempos).
     HIGH = 280
+    LOW = 150
     sustained_flag = [0] * n
+    stacked_flag = [0] * n
     for i in range(n):
         t = times[i]
         # Notes within ±200ms of this one.
@@ -886,14 +899,17 @@ def reading_profile(hittable: tuple[HitObject, ...]) -> ReadingProfile:
         window = velocities[j_lo:j_hi + 1]
         if not window:
             continue
-        # Sustained = median of the 400ms neighborhood is above threshold.
         window_sorted = sorted(window)
-        if window_sorted[len(window_sorted) // 2] > HIGH:
+        median_v = window_sorted[len(window_sorted) // 2]
+        if median_v > HIGH:
             sustained_flag[i] = 1
+        elif median_v < LOW:
+            stacked_flag[i] = 1
 
     return ReadingProfile(
         velocity_dense_p50=_pctile(dense_velocities, 0.50) if dense_velocities else 0.0,
         sustained_share=sum(sustained_flag) / n,
+        stacked_share=sum(stacked_flag) / n,
         velocity_p95=_pctile(velocities, 0.95),
     )
 

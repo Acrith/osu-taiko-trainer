@@ -3763,8 +3763,9 @@ def _render_features_panel(f) -> str:
         "burst mean length": "Average length of bursts. 3-4 = quick flurries; 5-6 = pushing into mini-stream territory.",
         "longest burst": "Length in notes of the map's longest burst.",
         "long-burst share (≥7)": "Fraction of bursts that are 7+ notes long — long enough that they start behaving like streams, not bursts.",
-        "dense p50 (bpm × sv)": "Median scroll velocity (BPM × SV) in the map's dense sections. 280+ is where notes \"smidge across the screen\" for KDDK players. Higher = the sustained scroll load is faster.",
+        "dense p50 (bpm × sv)": "Median scroll velocity (BPM × SV) in the map's dense sections. 280+ is where notes \"smidge across the screen\" for KDDK players. Comfort band is roughly 150-280. Below 150 = stack territory, above 280 = fast-scroll.",
         "sustained-fast share": "Fraction of the map where scroll velocity holds above 280 units in a sustained window (not one-note SV spikes). Captures how much of the map is genuinely fast-scroll.",
+        "stacked share": "Fraction of the map where scroll velocity SUSTAINS below 150 units — notes visually pile up because scroll doesn't clear them before the next lands. Reading pressure from the low side (mirror of sustained-fast).",
         "overall p95 (unfiltered)": "95th percentile scroll velocity across every note, dense sections OR sparse. Diagnostic only — not scored (spikes during rests don't test reading).",
     }
     def kv(label: str, value: str) -> str:
@@ -3837,9 +3838,10 @@ def _render_features_panel(f) -> str:
     </div>
 
     <div class="feat-group">
-      <div class="feat-title"><span>reading</span><span class="feat-val">dense scroll {f.reading.velocity_dense_p50:.0f} · sustained {f.reading.sustained_share*100:.0f}%</span></div>
+      <div class="feat-title"><span>reading</span><span class="feat-val">dense scroll {f.reading.velocity_dense_p50:.0f} · fast {f.reading.sustained_share*100:.0f}% · stacked {getattr(f.reading, 'stacked_share', 0)*100:.0f}%</span></div>
       {kv("dense p50 (bpm × sv)", f"{f.reading.velocity_dense_p50:.0f}")}
       {kv("sustained-fast share", f"{f.reading.sustained_share*100:.0f}%")}
+      {kv("stacked share", f"{getattr(f.reading, 'stacked_share', 0)*100:.0f}%")}
       {kv("overall p95 (unfiltered)", f"{f.reading.velocity_p95:.0f}")}
     </div>
   </section>"""

@@ -313,52 +313,54 @@ def _raw_consistency(f: MapFeatures) -> float:
 
 
 def _raw_reading(f: MapFeatures) -> float:
-    """Reading = fast base scroll velocity where notes are dense.
+    """Reading is a TWO-SIDED scroll-velocity pressure.
 
-    Distinct from gimmick (which is *chaotic* SV changes). A perfectly
-    consistent SV=2.5 map at high BPM is 0 gimmick but heavy reading —
-    the scroll just rushes at you and reaction time is the bottleneck.
+    Comfort band: ~150-280 units (BPM × SV), roughly "1.0 SV at typical
+    tempos". Deviation in either direction is harder to read:
 
-    The metric now uses the MEDIAN scroll velocity in dense sections
-    (velocity_dense_p50), not the 95th percentile. The 95th percentile
-    was picking up SV-spike sections that are gimmick moments, not
-    sustained reading pressure. And `sustained_share` requires the
-    ±200ms neighborhood to also be fast — a lone SV=2.5 spike in an
-    otherwise moderate-scroll map doesn't inflate the number.
+      FAST side (>280):  notes fly by; reaction time is the bottleneck.
+                         Extreme cases (semifinals: 400+) dominate.
+      SLOW side (<150):  notes visually pile up before the previous one
+                         clears. Player must disambiguate order + timing
+                         from a static stack. HR partly rescues this
+                         (scroll_mult=1.4 pushes velocity toward comfort).
+                         HD makes it worse (bigger frame to remember).
 
-    Anchors calibrated to the "notes smidge across the screen" band:
+    Both sides fire independently and sum — a map can have BOTH fast and
+    stacked sections. Distinct from gimmick, which captures chaotic SV
+    changes; reading is the sustained velocity level itself.
 
-        <180  no meaningful reading load (Kantan / low-BPM Futsuu)
-        180   normalization floor — where scroll starts feeling brisk
-        280   "starts feeling fast" (200 BPM HR, or 230 BPM standard-SV)
-        380   dense_p50 saturation — semifinals-tier reading (230 HR uniform,
-              260+ BPM NM). Above this reading dominates every other skill.
+    Anchors (fast side):
+        <180  no meaningful fast-side load (Kantan / low-BPM Futsuu)
+        180   floor — scroll starts feeling brisk
+        280   "starts feeling fast" (200 BPM HR, 230 BPM standard-SV)
+        380   dense_p50 saturation — semifinals-tier reading
 
-    Reference points a top KDDK player validated:
-        The Fool [Stamina Thief]    NM   dense_p50 ~230 → low  (stamina map)
-                                    HR   dense_p50 ~322 → semifinals-tier hard
-                                    HRDT dense_p50 ~483 → extreme
-        empty world [Emptiness]     HR   dense_p50 ~305 → moderate-hard
-                                         (SV spikes go higher but are gimmick,
-                                          not sustained reading)
+    Anchors (slow side):
+        >150  comfort or above, no stack pressure
+        150   floor — scroll starts feeling stacked
+        50    brutal stack (dense_p50 = 50 units → ≈ 0.25 SV at 200 BPM)
     """
     # velocity_dense_p50 is (per-note bpm × sv_multiplier) median in dense
     # sections. Same BPM-inflation issue as gimmick — scale by the trusted
     # ratio so a gimmick 727-BPM declaration doesn't fake a huge reading load.
     scale = _bpm_inflation_scale(f.movement)
-    dense_p50_n = _norm_up(f.reading.velocity_dense_p50 * scale, 180, 380)
-    # Anchor 0.20 → 0.95 so the difference between "72% sustained" and "100%
-    # sustained" doesn't saturate — that's exactly the boundary between
-    # "SV-variable map at high BPM" and "uniform-scroll tournament map",
-    # and the metric has to preserve it.
-    share_n     = _norm(f.reading.sustained_share, 0.20, 0.95)
-    # Median = the scroll speed the player has to sustain in dense sections.
-    # Share = what fraction of the map keeps that pressure without letting up
-    # (visual breaks from low-SV sections reset the reading load — that's
-    # exactly what makes The Fool feel harder than empty world at HR even
-    # when medians are similar).
-    # Both signals carry near-equal weight because both matter.
-    return 55 * dense_p50_n + 45 * share_n
+    v = f.reading.velocity_dense_p50 * scale
+
+    # FAST-side pressure (existing model).
+    dense_p50_n = _norm_up(v, 180, 380)
+    fast_share_n = _norm(f.reading.sustained_share, 0.20, 0.95)
+    fast_load = 55 * dense_p50_n + 45 * fast_share_n
+
+    # SLOW-side pressure. Fires when the sustained scroll drops well below
+    # comfort. `getattr` shields against ReadingProfiles from before the
+    # stacked_share field was added (pre-migration snapshots).
+    stack_p50_n = _norm(150.0 - v, 30.0, 100.0) if v > 0 else 0.0
+    stack_share = getattr(f.reading, "stacked_share", 0.0) or 0.0
+    stack_share_n = _norm(stack_share, 0.10, 0.70)
+    stack_load = 35 * stack_p50_n + 30 * stack_share_n
+
+    return fast_load + stack_load
 
 
 def _od_pressure(
