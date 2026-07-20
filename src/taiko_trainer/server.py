@@ -125,6 +125,23 @@ def create_app(workspace: str) -> FastAPI:
     if auth_module.is_web_mode():
         auth_module.config()
         print("[auth] running in WEB mode (osu! OAuth login enabled)", flush=True)
+
+        # Seed the osu! API client credentials into catalog_meta so
+        # osu_api.is_configured() returns True. The same OAuth app credentials
+        # work for both the user-login Authorization Code flow AND the
+        # server-to-server Client Credentials flow (map lookup). This
+        # unlocks the osu! API fallback in workflow._resolve_map so users
+        # can upload replays for maps the server doesn't already have.
+        import os as _os
+        cid = _os.environ.get("OSU_OAUTH_CLIENT_ID", "")
+        csec = _os.environ.get("OSU_OAUTH_CLIENT_SECRET", "")
+        if cid and csec:
+            from . import osu_api as _oa
+            cat = open_catalog(workspace)
+            if not _oa.is_configured(cat):
+                _oa.save_credentials(cat, cid, csec)
+                print("[startup] seeded osu! API client credentials from env", flush=True)
+            cat.close()
     else:
         print("[auth] running in LOCAL mode (single implicit user)", flush=True)
 
