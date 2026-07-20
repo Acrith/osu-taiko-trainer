@@ -602,13 +602,21 @@ def create_app(workspace: str) -> FastAPI:
     def map_detail_page(md5: str):
         cat = open_catalog(workspace)
         row = get_map(cat, md5.lower())
-        cat.close()
         if not row:
+            cat.close()
             return HTMLResponse(_render_error(f"map {md5!r} not in catalog"), status_code=404)
+        # Lazy backfill: pull star rating from osu! API if we don't have it.
+        if row.get("star_rating") is None:
+            from .db import ensure_star_rating
+            try:
+                sr = ensure_star_rating(cat, md5.lower())
+                if sr is not None:
+                    row = dict(row); row["star_rating"] = sr
+            except Exception:
+                pass
         # Reconstruct features from the stored .osu blob so the feature panel
         # renders the same as on a replay detail page.
         features = None
-        cat = open_catalog(workspace)
         content = get_map_content(cat, md5.lower())
         cat.close()
         if content:
@@ -859,6 +867,7 @@ def create_app(workspace: str) -> FastAPI:
                    m.md5 AS map_md5_ref,
                    m.beatmap_id, m.beatmapset_id,
                    m.duration_s, m.hittable_notes, m.bpm_min, m.bpm_max, m.od,
+                   m.star_rating,
                    -- Show the rating the player actually cleared: mod-adjusted
                    -- effective when present, base map rating for NM. Same
                    -- COALESCE shape as get_replays() so this page's numbers
@@ -904,6 +913,16 @@ def create_app(workspace: str) -> FastAPI:
                 except Exception:
                     features = None
                     judged = None
+            # Lazy backfill: fetch star rating from osu! API if we don't
+            # have it cached yet. One API call per map, cached forever.
+            if row.get("star_rating") is None:
+                from .db import ensure_star_rating
+                try:
+                    sr = ensure_star_rating(conn, row["map_md5_ref"])
+                    if sr is not None:
+                        row = dict(row); row["star_rating"] = sr
+                except Exception:
+                    pass
         conn.close()
         if not row:
             return HTMLResponse(_render_error(f"Replay {replay_id} for {player} not found."), status_code=404)
@@ -1660,6 +1679,18 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--ground)
   border: 1px solid rgba(255,255,255,0.28);
   backdrop-filter: blur(6px);
 }
+.star-pill {
+  display: inline-block;
+  padding: 5px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  background: rgba(255, 193, 71, 0.22);
+  color: #ffd47a;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 193, 71, 0.55);
+  backdrop-filter: blur(6px);
+}
 .hero-fc {
   display: inline-block;
   font-family: var(--font-mono);
@@ -2255,6 +2286,7 @@ def _render_map_hero(row: dict, player: str) -> str:
       <div class="hero-left">
         <div class="hero-pill-row">
           <span class="diff-pill">{row['map_version']}</span>
+          {('<span class="star-pill">★ ' + f"{row['star_rating']:.2f}" + '</span>') if row.get('star_rating') else ''}
           {_mods_chip(row.get('mods_label'), size='lg')}
           {combo_indicator}
         </div>
@@ -4302,6 +4334,7 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
       <div class="hero-left">
         <div class="hero-pill-row">
           <span class="diff-pill">{version}</span>
+          {('<span class="star-pill">★ ' + f"{row['star_rating']:.2f}" + '</span>') if row.get('star_rating') else ''}
         </div>
         <h1 class="hero-title">{title}</h1>
         <p class="hero-artist">{artist}</p>

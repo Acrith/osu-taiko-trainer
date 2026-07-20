@@ -72,7 +72,10 @@ CREATE TABLE IF NOT EXISTS maps (
     -- Moderation: 'approved' (default, ratings count), 'pending' (marathon
     -- awaiting admin review — ratings zeroed, replays don't hit leaderboards),
     -- 'rejected' (soft-deleted, kept for audit — normally we hard-delete).
-    status                 TEXT NOT NULL DEFAULT 'approved'
+    status                 TEXT NOT NULL DEFAULT 'approved',
+    -- osu! API star rating for the base map (nomod). NULL for maps that
+    -- weren't fetched via API — we backfill lazily on view.
+    star_rating            REAL
 );
 
 CREATE TABLE IF NOT EXISTS catalog_meta (
@@ -244,6 +247,8 @@ def _migrate_catalog_schema(conn: sqlite3.Connection) -> None:
         # so add nullable then backfill + treat NULL as approved in queries.
         conn.execute("ALTER TABLE maps ADD COLUMN status TEXT")
         conn.execute("UPDATE maps SET status = 'approved' WHERE status IS NULL")
+    if "star_rating" not in existing:
+        conn.execute("ALTER TABLE maps ADD COLUMN star_rating REAL")
     # api_tokens table (Task #67) — CREATE IF NOT EXISTS in _CATALOG_SCHEMA
     # handles the fresh case; nothing to migrate for existing catalogs
     # since the whole table is new (older catalogs simply won't have it
@@ -390,6 +395,37 @@ def upsert_map(
         ),
     )
     conn.commit()
+
+
+def ensure_star_rating(conn: sqlite3.Connection, md5: str) -> float | None:
+    """Look up the star rating from osu! API if we don't already have it
+    cached. One API call per unrated map (bearer token is cached workspace-
+    wide, so this is a single HTTP hit). Returns the star rating or None
+    on any failure — the caller should treat None as "unknown, don't show".
+
+    Idempotent: subsequent calls return the cached value instantly."""
+    schema = "catalog" if _has_attached_catalog(conn) else "main"
+    row = conn.execute(
+        f"SELECT star_rating FROM {schema}.maps WHERE md5 = ?", (md5,)
+    ).fetchone()
+    if row and row["star_rating"] is not None:
+        return float(row["star_rating"])
+    # Cache miss — try osu! API.
+    from . import osu_api
+    if not osu_api.is_configured(conn):
+        return None
+    try:
+        lookup = osu_api.lookup_beatmap(conn, md5)
+    except osu_api.OsuApiError:
+        return None
+    if not lookup:
+        return None
+    sr = float(lookup.star_rating)
+    conn.execute(
+        f"UPDATE {schema}.maps SET star_rating = ? WHERE md5 = ?", (sr, md5)
+    )
+    conn.commit()
+    return sr
 
 
 def list_pending_maps(conn: sqlite3.Connection) -> list[dict]:
