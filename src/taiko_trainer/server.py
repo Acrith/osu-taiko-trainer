@@ -1229,6 +1229,13 @@ header.site nav a {
 }
 header.site nav a:hover { color: var(--ink); text-decoration: none; }
 header.site nav a.active { color: var(--accent); }
+/* Upload nav item styled as a call-to-action button rather than plain link */
+header.site nav a.nav-cta {
+  padding: 6px 14px; border: 1px solid var(--accent); border-radius: 3px;
+  color: var(--accent); letter-spacing: 0.16em; font-weight: 500;
+}
+header.site nav a.nav-cta:hover { background: var(--accent); color: white; }
+header.site nav a.nav-cta.active { background: var(--accent); color: white; }
 /* Native browser tooltip on labels that have title="…". Subtle marker so users
    know something's there without being noisy. */
 [title] { cursor: help; }
@@ -2225,9 +2232,19 @@ def _html_page(title: str, body: str, active: str = "") -> str:
         ]
     else:
         nav_items = [("Home", "/", "home")]
+    def _nav_link(label: str, href: str, key: str) -> str:
+        classes = []
+        if key == active:
+            classes.append("active")
+        # The Upload item is a call-to-action — style it as a button rather
+        # than a plain nav link so it stands out and reads as "do a thing".
+        if key == "upload":
+            classes.append("nav-cta")
+        cls = f' class="{" ".join(classes)}"' if classes else ""
+        return f'<a href="{href}"{cls}>{label}</a>'
+
     nav_html = " ".join(
-        f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>'
-        for label, href, key in nav_items
+        _nav_link(label, href, key) for label, href, key in nav_items
     )
     return f"""<!doctype html>
 <html><head>
