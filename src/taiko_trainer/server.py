@@ -3612,7 +3612,11 @@ def _render_replay(row: dict, player: str, features=None, judged=None) -> str:
         if causes_html else ""
     )
 
-    features_section = _render_features_panel(features) if features else ""
+    # HR toggles aspect-dependent runway/notes-on-screen scaling in the
+    # features panel; DT/HT are already baked into features via BPM scaling.
+    from .mods import parse_mods as _pmods_for_display
+    _display_mods = _pmods_for_display(row.get("mods_bitfield") or 0)
+    features_section = _render_features_panel(features, is_hr=_display_mods.has_hr) if features else ""
     header_badge = _fc_badge(row.get("count_miss", 1), row.get("count_ok", 1))
     warning_html = _render_discrepancy_warning(row)
     hero_section = _render_map_hero(row, player)
@@ -3766,8 +3770,14 @@ def _render_timing_histogram(judged) -> str:
     """
 
 
-def _render_features_panel(f) -> str:
-    """Show the numbers that drove each rating dimension. `f` is a MapFeatures."""
+def _render_features_panel(f, is_hr: bool = False) -> str:
+    """Show the numbers that drove each rating dimension. `f` is a MapFeatures.
+
+    `is_hr` controls HR-scaling of the display-only runway/notes-on-screen
+    metrics — features are stored in the canonical (NM, 16:9) frame; HR's
+    aspect-dependent factor is applied at display time here + at scoring
+    time in _raw_reading_split. DT/HT are already baked into the features
+    via apply_mods_to_beatmap (BPM scaling), so no extra factor needed."""
     d = f.density
     m = f.movement
     c = f.color
@@ -3775,6 +3785,9 @@ def _render_features_panel(f) -> str:
     b = f.bursts
     g = f.gimmick
     s = f.strain
+    # HR's aspect-dependent effective scroll multiplier (16:9 assumed).
+    # See feedback_reading_model.md and mods.py for derivation.
+    _hr_factor = 1.867 if is_hr else 1.0
 
     # divisor mix (top 4 shares, ignore "other" if trivial)
     div_items = sorted(r.divisor_share.items(), key=lambda kv: -kv[1])[:4]
@@ -3901,10 +3914,10 @@ def _render_features_panel(f) -> str:
     </div>
 
     <div class="feat-group">
-      <div class="feat-title"><span>reading</span><span class="feat-val">runway {getattr(f.reading, 'runway_ms_dense_p50', 0):.0f} ms · {getattr(f.reading, 'notes_on_screen_p95', 0):.1f} notes on screen</span></div>
-      {kv("runway p50 (median dense)", f"{getattr(f.reading, 'runway_ms_dense_p50', 0):.0f} ms")}
-      {kv("runway p95 (peak-stress)", f"{getattr(f.reading, 'runway_ms_dense_p95', 0):.0f} ms")}
-      {kv("notes on screen (p95)", f"{getattr(f.reading, 'notes_on_screen_p95', 0):.1f}")}
+      <div class="feat-title"><span>reading</span><span class="feat-val">runway {(getattr(f.reading, 'runway_ms_dense_p50', 0) / _hr_factor):.0f} ms · {(getattr(f.reading, 'notes_on_screen_p95', 0) / _hr_factor):.1f} notes on screen</span></div>
+      {kv("runway p50 (median dense)", f"{(getattr(f.reading, 'runway_ms_dense_p50', 0) / _hr_factor):.0f} ms")}
+      {kv("runway p95 (peak-stress)", f"{(getattr(f.reading, 'runway_ms_dense_p95', 0) / _hr_factor):.0f} ms")}
+      {kv("notes on screen (p95)", f"{(getattr(f.reading, 'notes_on_screen_p95', 0) / _hr_factor):.1f}")}
       {kv("dense p50 (bpm × sv, legacy)", f"{f.reading.velocity_dense_p50:.0f}")}
       {kv("sustained-fast share (legacy)", f"{f.reading.sustained_share*100:.0f}%")}
       {kv("stacked share (legacy)", f"{getattr(f.reading, 'stacked_share', 0)*100:.0f}%")}
