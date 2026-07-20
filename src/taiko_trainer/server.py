@@ -879,11 +879,15 @@ def create_app(workspace: str) -> FastAPI:
         except Exception as e:
             cat.close()
             raise HTTPException(status_code=400, detail=f"could not parse .osu: {e}")
-        if bm.mode != 1:
-            cat.close()
-            raise HTTPException(status_code=400, detail=f"not a taiko map (mode={bm.mode})")
 
         features = extract_features(bm)
+        # Central ingest gate: rejects converted diffs + low-star marathons.
+        from .workflow import _reject_reason_for_map
+        reject = _reject_reason_for_map(cat, md5, bm, features)
+        if reject:
+            cat.close()
+            raise HTTPException(status_code=400, detail=f"map rejected: {reject}")
+
         rating = rate_map(features, od=bm.difficulty.overall_difficulty)
         upsert_map(cat, bm, features, rating, content)
         cat.close()

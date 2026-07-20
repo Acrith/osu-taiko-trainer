@@ -66,6 +66,44 @@ def _parse_bytes_as_osu(content: bytes) -> TaikoBeatmap:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+# Marathons threshold: anything longer than this needs to clear a star-rating
+# floor to be catalogued. 10 minutes is the community line between "long map"
+# and "marathon" — Konpaku Marathon, Hardyzz's Chikuwa, etc. all sit above it.
+MARATHON_DURATION_S = 600.0
+MARATHON_MIN_STAR = 7.0
+
+
+def _reject_reason_for_map(cat, md5: str, bm: TaikoBeatmap, features) -> str | None:
+    """Return a rejection reason string, or None if the map is fine to catalogue.
+
+    Rules:
+      - `bm.mode != 1` — converted (osu!std / catch / mania → taiko) diffs are
+        rejected. Only native taiko maps get in.
+      - Marathons (>10 min) require osu! API star_rating >= 7. Short low-effort
+        marathons would otherwise flood the catalog and leaderboards.
+    """
+    if bm.mode != 1:
+        return (f"not a native taiko difficulty (mode={bm.mode}); "
+                "only native taiko maps are catalogued, not converted diffs")
+    if features.density.duration_s > MARATHON_DURATION_S:
+        from . import osu_api
+        if not osu_api.is_configured(cat):
+            return (f"marathon (>{int(MARATHON_DURATION_S/60)} min) needs osu! API "
+                    "star_rating check but the workspace has no API credentials")
+        try:
+            lookup = osu_api.lookup_beatmap(cat, md5)
+        except osu_api.OsuApiError as e:
+            return f"marathon star_rating check failed: {e}"
+        if lookup is None:
+            return ("marathon not found on osu! API — can't verify star_rating "
+                    "(unranked / removed / md5 mismatch)")
+        if lookup.star_rating < MARATHON_MIN_STAR:
+            return (f"marathon star_rating {lookup.star_rating:.2f}★ is below the "
+                    f"{MARATHON_MIN_STAR:.1f}★ floor for maps longer than "
+                    f"{int(MARATHON_DURATION_S/60)} min")
+    return None
+
+
 def _resolve_map(
     workspace: str | Path,
     target_md5: str,
@@ -287,6 +325,14 @@ def add_replay(
 
     _report("rate_map", note="computing map features + rating")
     features = extract_features(bm)
+
+    # Ingest gate — reject non-native-taiko diffs and low-star marathons.
+    cat = open_catalog(workspace)
+    reject = _reject_reason_for_map(cat, target_md5, bm, features)
+    cat.close()
+    if reject:
+        return AddResult(False, f"map rejected: {reject}")
+
     rating = rate_map(features, od=bm.difficulty.overall_difficulty)
 
     # Store the map in the catalog (blob + cached rating).
