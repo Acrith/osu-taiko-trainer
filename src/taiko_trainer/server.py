@@ -899,6 +899,26 @@ def create_app(workspace: str) -> FastAPI:
         finally:
             shutil.rmtree(td, ignore_errors=True)
 
+    @app.get("/upload", response_class=HTMLResponse)
+    def upload_page(
+        session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
+    ):
+        """Web-based upload page: drag-drop zone for occasional .osr uploads +
+        instructions for the standalone uploader companion. Requires login in
+        web mode so the identity gate on POST /upload has a session to check
+        against; local mode routes everyone through the single implicit user."""
+        if auth_module.is_web_mode():
+            uid = auth_module.read_session_cookie(session)
+            if uid is None:
+                return RedirectResponse(url="/login", status_code=302)
+            cat = open_catalog(workspace)
+            user = get_user_by_id(cat, uid)
+            cat.close()
+            username = user["osu_username"] if user else "?"
+        else:
+            username = None
+        return HTMLResponse(_render_upload_page(username))
+
     @app.post("/upload")
     async def upload(
         request: Request,
@@ -2144,6 +2164,7 @@ def _html_page(title: str, body: str, active: str = "") -> str:
         nav_items = [
             ("Leaderboards", "/leaderboards", "leaderboards"),
             ("Maps",         "/maps",         "maps"),
+            ("Upload",       "/upload",       "upload"),
         ]
     else:
         nav_items = [("Home", "/", "home")]
@@ -3984,6 +4005,131 @@ def _render_map_detail(row: dict, features, plays: list[dict]) -> str:
   </script>
 """
     return _html_page(f"{title} [{version}]", body)
+
+
+def _render_upload_page(username: str | None) -> str:
+    """Web-mode upload page — drag-drop zone + companion-app instructions.
+    Both paths POST to /upload; the companion just automates it. In web mode
+    the identity gate rejects .osr where player field != session user."""
+    web_mode = auth_module.is_web_mode()
+    identity_hint = (
+        f'<p class="hint">You are logged in as <b>{username}</b>. '
+        f'Uploads must be your own replays — the .osr\'s player field must '
+        f'match your osu! username or the server rejects it.</p>'
+        if web_mode and username else ""
+    )
+    body = f"""
+  <section>
+    <h1 class="page-title">Upload replays</h1>
+    <p class="hint">Two ways to get your replays into taiko-trainer: drag-drop below for occasional uploads, or install the uploader companion for auto-upload every time you finish a play.</p>
+  </section>
+
+  <section class="card">
+    <h2>Web upload  <span class="hint" style="font-size: 12px; margin-left: 8px;">occasional / one-off replays</span></h2>
+    {identity_hint}
+    <form id="upload-form" method="post" action="/upload" enctype="multipart/form-data">
+      <div id="drop-zone" class="drop-zone">
+        <div class="drop-zone-hint">
+          <div class="drop-icon">↓</div>
+          <div class="drop-primary">Drop <code>.osr</code> files here</div>
+          <div class="drop-secondary">or <label for="file-picker" class="link-like">browse</label></div>
+        </div>
+        <input type="file" id="file-picker" name="file" accept=".osr" style="display: none;">
+      </div>
+      <div id="pending-file" class="pending-file" style="display: none;"></div>
+      <button type="submit" id="upload-btn" class="upload-btn" disabled>Upload</button>
+    </form>
+    <p class="hint" style="margin-top: 14px;">
+      Progress toast appears in the bottom-right corner after upload starts.
+      Works across page navigation. Uploads persist even if you close this tab.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Uploader companion  <span class="hint" style="font-size: 12px; margin-left: 8px;">auto-upload every play</span></h2>
+    <p>
+      A small local agent that watches your osu! <code>Data/r/</code> folder and posts
+      new <code>.osr</code> files to your account seconds after you finish a play.
+      Your report updates live without touching a browser.
+    </p>
+    <div class="companion-status">
+      <div class="companion-status-label">Status:</div>
+      <div class="companion-status-value">
+        <span class="companion-badge">Coming soon — standalone binary</span>
+        <div class="companion-note hint">
+          Currently only available via the Python source (developer install). Standalone Windows/Mac/Linux binaries are being built. If you're comfortable with Python you can grab it from
+          <a href="https://github.com/Acrith/osu-taiko-trainer" target="_blank" rel="noopener">the repo</a> — clone, <code>uv sync</code>, then <code>uv run taiko-uploader init</code>.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <style>
+    .page-title {{ font-family: var(--font-mono); font-size: 28px; margin: 0 0 8px; color: var(--ink); }}
+    .drop-zone {{
+      border: 2px dashed var(--rule); border-radius: 6px; padding: 40px 20px;
+      text-align: center; cursor: pointer; transition: all 0.15s ease;
+      background: var(--panel);
+    }}
+    .drop-zone.dragover {{ border-color: var(--accent); background: rgba(232, 100, 40, 0.08); }}
+    .drop-zone-hint {{ pointer-events: none; }}
+    .drop-icon {{ font-size: 42px; color: var(--ink-faint); margin-bottom: 8px; line-height: 1; }}
+    .drop-primary {{ font-family: var(--font-mono); font-size: 15px; color: var(--ink); margin-bottom: 4px; }}
+    .drop-secondary {{ font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }}
+    .link-like {{ color: var(--accent); text-decoration: underline; cursor: pointer; pointer-events: auto; }}
+    .pending-file {{
+      margin-top: 12px; padding: 10px 14px; background: var(--panel);
+      border: 1px solid var(--rule); border-radius: 3px; font-family: var(--font-mono); font-size: 13px;
+    }}
+    .upload-btn {{
+      margin-top: 14px; padding: 10px 28px; background: var(--accent); color: white;
+      border: none; border-radius: 3px; font-family: var(--font-mono); font-size: 12px;
+      letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer;
+    }}
+    .upload-btn:disabled {{ background: var(--rule); color: var(--ink-faint); cursor: not-allowed; }}
+    .companion-status {{ margin-top: 14px; padding: 16px; background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; }}
+    .companion-status-label {{ font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px; }}
+    .companion-badge {{
+      display: inline-block; font-family: var(--font-mono); font-size: 11px;
+      padding: 4px 10px; border: 1px dashed rgba(232, 164, 58, 0.6);
+      background: rgba(232, 164, 58, 0.08); color: #e8a43a; border-radius: 3px;
+    }}
+    .companion-note {{ margin-top: 10px; font-size: 12px; }}
+  </style>
+  <script>
+    const dz = document.getElementById('drop-zone');
+    const picker = document.getElementById('file-picker');
+    const pending = document.getElementById('pending-file');
+    const btn = document.getElementById('upload-btn');
+
+    function selectFile(f) {{
+      if (!f) return;
+      if (!f.name.toLowerCase().endsWith('.osr')) {{
+        alert('Only .osr replay files are accepted.');
+        return;
+      }}
+      // Move the picker's files programmatically so form submit sends it
+      const dt = new DataTransfer();
+      dt.items.add(f);
+      picker.files = dt.files;
+      pending.textContent = '📎 ' + f.name + '  (' + (f.size / 1024).toFixed(1) + ' KB)';
+      pending.style.display = 'block';
+      btn.disabled = false;
+    }}
+
+    dz.addEventListener('click', () => picker.click());
+    picker.addEventListener('change', () => selectFile(picker.files[0]));
+
+    dz.addEventListener('dragover', (e) => {{ e.preventDefault(); dz.classList.add('dragover'); }});
+    dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+    dz.addEventListener('drop', (e) => {{
+      e.preventDefault();
+      dz.classList.remove('dragover');
+      selectFile(e.dataTransfer.files[0]);
+    }});
+  </script>
+"""
+    return _html_page("upload", body)
 
 
 def _render_web_landing(recent_users: list[dict]) -> str:
