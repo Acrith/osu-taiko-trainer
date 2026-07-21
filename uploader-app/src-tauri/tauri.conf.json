@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],
+    "createUpdaterArtifacts": true,
     "publisher": "Acrith",
     "category": "Utility",
     "shortDescription": "osu!taiko trainer uploader",
@@ -45,6 +46,14 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Acrith/osu-taiko-trainer/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlDMENCNUMyRjRBQzhFOTQKUldTVWpxejB3clVNbkVCWENPcnNqQTJydWZjWTM0bk5lWjJJcERnaUVTdnlVelg0bnh5dnNCU3EK"
     }
   }
 }

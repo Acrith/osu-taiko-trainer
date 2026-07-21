@@ -5,6 +5,7 @@
   import { listen } from "@tauri-apps/api/event";
   import Sidebar from "./lib/Sidebar.svelte";
   import UploadResultToast from "./lib/UploadResultToast.svelte";
+  import { scheduleUpdateCheck } from "./lib/updater.js";
   import Home from "./lib/screens/Home.svelte";
   import Replays from "./lib/screens/Replays.svelte";
   import Settings from "./lib/screens/Settings.svelte";
@@ -25,6 +26,10 @@
   currentScreen.subscribe(v => (screen = v));
 
   onMount(async () => {
+    // Fire-and-forget update check on launch (3s delay, silent on
+    // failure — see lib/updater.js).
+    scheduleUpdateCheck();
+
     // Prime the stores in parallel — each invoke is independent.
     const [cfg, srv, initStats, initRecent] = await Promise.all([
       invoke("get_config").catch(() => null),

@@ -2,7 +2,7 @@ name: build-uploader-tauri
 
 # Manual dispatch (with optional "release" flag) or tag-triggered.
 # Tag format `uploader-v*` (e.g. `uploader-v0.2.0`) auto-creates a GitHub
-# Release with the installers attached.
+# Release with the installers + updater manifest attached.
 
 on:
   push:
@@ -24,6 +24,13 @@ jobs:
     defaults:
       run:
         working-directory: uploader-app
+
+    env:
+      # Updater signing keys — must be set as repo secrets before the
+      # first signed build. Missing keys make `tauri build` fall through
+      # to unsigned artifacts + skip the .sig / latest.json step.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -50,11 +57,55 @@ jobs:
       - name: Build Tauri bundle
         run: npm run tauri build -- --verbose
 
+      # The updater manifest (`latest.json`) points the shipped exe at
+      # the next installer + carries its detached signature. Tauri
+      # generates the .sig files during `tauri build` when the signing
+      # env vars are set; this step reads them and writes the JSON.
+      - name: Generate updater manifest
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $sigPath = Get-ChildItem "uploader-app\src-tauri\target\release\bundle\nsis\*setup.exe.sig" | Select-Object -First 1
+          if (-not $sigPath) {
+            Write-Host "::warning::No .sig file found — updater manifest skipped"
+            exit 0
+          }
+          $sig = Get-Content $sigPath.FullName -Raw
+          $exeName = $sigPath.Name -replace '\.sig$', ''
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "uploader-manual-${{ github.run_number }}" }
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$exeName"
+          $version = ($tag -replace '^uploader-v', '')
+          $pubDate = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+
+          $manifest = @{
+            version = $version
+            notes = "See the GitHub Release page for changes."
+            pub_date = $pubDate
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $sig.Trim()
+                url = $installerUrl
+              }
+            }
+          }
+          $json = $manifest | ConvertTo-Json -Depth 5
+          Set-Content -Path "latest.json" -Value $json -Encoding UTF8
+          Write-Host "Generated latest.json:"
+          Get-Content latest.json
+
       - name: Upload NSIS installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: taiko-uploader-windows-nsis
           path: uploader-app/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+
+      - name: Upload NSIS signature artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: taiko-uploader-windows-nsis-sig
+          path: uploader-app/src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: warn
 
       - name: Upload MSI installer artifact
@@ -71,6 +122,14 @@ jobs:
           path: uploader-app/src-tauri/target/release/taiko-uploader.exe
           if-no-files-found: warn
 
+      - name: Upload updater manifest artifact
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-json
+          path: latest.json
+          if-no-files-found: warn
+
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/uploader-v') || github.event.inputs.release == 'true'
         uses: softprops/action-gh-release@v2
@@ -78,7 +137,9 @@ jobs:
           files: |
             uploader-app/src-tauri/target/release/taiko-uploader.exe
             uploader-app/src-tauri/target/release/bundle/nsis/*.exe
+            uploader-app/src-tauri/target/release/bundle/nsis/*.exe.sig
             uploader-app/src-tauri/target/release/bundle/msi/*.msi
+            latest.json
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('uploader-manual-{0}', github.run_number) }}
           prerelease: ${{ github.ref_type != 'tag' }}
           name: taiko-uploader ${{ github.ref_type == 'tag' && github.ref_name || format('manual build {0}', github.run_number) }}
@@ -89,3 +150,9 @@ jobs:
             - **taiko-uploader.exe** — portable, no install, run from anywhere
             - **taiko-uploader-…-setup.exe** — NSIS installer (recommended for most users)
             - **taiko-uploader-…-x64.msi** — MSI installer (for enterprise deployment)
+
+            **Windows SmartScreen note**: on first run Windows will show "Windows protected your PC" because
+            the exe isn't code-signed yet. Click **More info** → **Run anyway** to proceed.
+
+            **Auto-updates**: once installed, the app checks GitHub Releases on every launch and offers to
+            install newer versions automatically. Signature-verified against the pubkey baked into the binary.
