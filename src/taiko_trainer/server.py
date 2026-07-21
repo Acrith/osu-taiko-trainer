@@ -5103,8 +5103,15 @@ def _render_upload_page(username: str | None) -> str:
       <div class="companion-step">
         <span class="companion-step-n">3</span>
         <div class="companion-step-body">
-          Play. Every finished play uploads within a couple seconds and shows
-          a gain popup with the skill it earned you.
+          Play, and press <b>F2</b> on the results screen to export the replay.
+          osu! stable only writes a <code>.osr</code> when you hit F2 — the
+          uploader picks it up seconds later and shows a gain popup with the
+          skill it earned you.
+          <div class="companion-step-note">
+            <b>Tip</b>: rebind Export Replay to something more comfortable in
+            osu! settings if you'll be doing this often. Nothing forces you
+            to review the results screen first — F2 → next map works fine.
+          </div>
         </div>
       </div>
     </div>
