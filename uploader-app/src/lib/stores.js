@@ -33,6 +33,14 @@ export const mySkill = writable(null);
 // as UPLOADED. Shape: { username, replays: [ {id, content_hash, ...} ] }.
 export const myReplays = writable(null);
 
+// Post-upload "gain" toast payload — populated by App.svelte after a
+// successful upload once the new skill snapshot arrives. Shape:
+//   { map_title, mods, accuracy, total_delta, dims_delta: { speed, ... },
+//     at }
+// null when there's nothing to show. The toast component owns the
+// auto-dismiss timer and clears this back to null.
+export const lastGain = writable(null);
+
 // The Config the daemon is running with. Editable from Settings.
 export const config = writable(null);
 

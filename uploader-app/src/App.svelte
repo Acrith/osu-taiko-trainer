@@ -1,16 +1,25 @@
 <script>
   import { onMount } from "svelte";
+  import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import Sidebar from "./lib/Sidebar.svelte";
+  import UploadResultToast from "./lib/UploadResultToast.svelte";
   import Home from "./lib/screens/Home.svelte";
   import Replays from "./lib/screens/Replays.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import About from "./lib/screens/About.svelte";
   import {
     currentScreen, status, whoami, config, recentActivity, stats,
-    defaultServerUrl, mySkill, myReplays,
+    defaultServerUrl, mySkill, myReplays, lastGain,
   } from "./lib/stores.js";
+
+  const DIMS = ["speed", "stamina", "gimmick", "technical", "consistency", "reading"];
+  // The "before" snapshot captured the moment an upload starts, so once
+  // the refreshed skill lands we can diff and populate the toast. One
+  // slot is enough — during a burst the last upload wins the toast.
+  let pendingSnapshot = null;
+  let pendingActivity = null;
 
   let screen = $state("home");
   currentScreen.subscribe(v => (screen = v));
@@ -52,13 +61,53 @@
     // Refresh skill + replays list whenever a new upload completes —
     // the server recomputes the snapshot after each replay lands, so
     // the Home band + Replays classification should reflect it within
-    // a couple seconds.
+    // a couple seconds. For successful uploads, also capture the
+    // pre-upload skill snapshot so we can compute a delta and show
+    // the gain toast when the new snapshot arrives.
     let serverRefreshQueued = null;
-    const unlistenServer = await listen("activity-added", () => {
+    const unlistenServer = await listen("activity-added", ev => {
+      const a = ev.payload;
+      if (a?.status === "uploaded") {
+        // Snapshot "before" as of the moment the upload landed. If a
+        // previous upload's refresh hadn't completed yet, we still
+        // overwrite — the newest upload's diff is what the user sees.
+        pendingSnapshot = get(mySkill);
+        pendingActivity = a;
+      }
       clearTimeout(serverRefreshQueued);
-      serverRefreshQueued = setTimeout(() => {
-        invoke("fetch_my_skill").then(s => mySkill.set(s)).catch(() => {});
-        invoke("fetch_my_replays").then(r => myReplays.set(r)).catch(() => {});
+      serverRefreshQueued = setTimeout(async () => {
+        const before = pendingSnapshot;
+        const activity = pendingActivity;
+        pendingSnapshot = null;
+        pendingActivity = null;
+        const [newSkill] = await Promise.all([
+          invoke("fetch_my_skill").catch(() => null),
+          invoke("fetch_my_replays").then(r => myReplays.set(r)).catch(() => {}),
+        ]);
+        if (newSkill) mySkill.set(newSkill);
+        if (activity && newSkill?.has_data && before?.has_data) {
+          const dims_delta = {};
+          let total_delta = 0;
+          for (const d of DIMS) {
+            const diff = Math.round((newSkill[d] ?? 0) - (before[d] ?? 0));
+            dims_delta[d] = diff;
+            total_delta += diff;
+          }
+          // Only surface the toast when SOMETHING actually moved. A
+          // second copy of an already-uploaded map (server 200s with
+          // no snapshot change) doesn't earn a popup.
+          const anyMove = total_delta !== 0 || DIMS.some(d => dims_delta[d] !== 0);
+          if (anyMove) {
+            lastGain.set({
+              map_title: activity.map_title,
+              mods: activity.mods,
+              accuracy: activity.accuracy,
+              total_delta,
+              dims_delta,
+              at: Date.now(),
+            });
+          }
+        }
       }, 1500);
     });
 
@@ -106,6 +155,7 @@
       <About />
     {/if}
   </main>
+  <UploadResultToast />
 </div>
 
 <style>
