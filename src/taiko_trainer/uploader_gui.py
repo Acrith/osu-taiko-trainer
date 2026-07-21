@@ -300,26 +300,51 @@ class _MainWindow:
     Shares the same UploaderThread with the tray icon — the tray runs
     detached in its own thread (see _run_app)."""
 
-    def __init__(self, root: tk.Tk, uploader: UploaderThread, cfg: Config, quit_cb):
+    def __init__(self, root: tk.Tk, uploader: UploaderThread, cfg: Config, quit_cb, whoami: dict | None = None):
         self.root = root
         self.uploader = uploader
         self.cfg = cfg
         self._quit_cb = quit_cb
+        self._whoami = whoami
         self._state_cache = State(_state_path())  # Read-only shadow for the UI
         self._build_layout()
+        # Once layout exists, populate the identity strip if we have data
+        if whoami:
+            self._render_whoami(whoami)
         self._refresh()   # initial render
         self._schedule_refresh()
+
+    def _render_whoami(self, w: dict) -> None:
+        name = w.get("osu_username") or "?"
+        cc   = (w.get("osu_country_code") or "").upper()
+        rank = w.get("osu_global_rank")
+        rank_str = f"  ·  #{rank:,} taiko" if rank else ""
+        badge = f"[{cc}]  " if cc else ""
+        self.player_name_var.set(f"{badge}{name}")
+        self.player_meta_var.set(f"logged in via API token{rank_str}  ·  {self.cfg.server_url}")
 
     # --- Layout ------------------------------------------------------------
 
     def _build_layout(self) -> None:
         self.root.title(APP_NAME)
-        self.root.geometry("720x560")
-        self.root.minsize(640, 480)
+        self.root.geometry("760x780")
+        self.root.minsize(700, 640)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         main = ttk.Frame(self.root, padding=14)
         main.pack(fill=tk.BOTH, expand=True)
+
+        # --- Player card (thin, like leaderboard row) ---
+        self.player_frame = ttk.Frame(main, padding=(12, 8))
+        self.player_frame.pack(fill=tk.X, pady=(0, 12))
+        self.player_avatar_lbl = ttk.Label(self.player_frame, text="●", font=("Segoe UI", 22))
+        self.player_avatar_lbl.pack(side=tk.LEFT, padx=(0, 12))
+        self.player_name_var = tk.StringVar(value="…")
+        self.player_meta_var = tk.StringVar(value=self.cfg.server_url)
+        pl_txt = ttk.Frame(self.player_frame)
+        pl_txt.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(pl_txt, textvariable=self.player_name_var, font=("Segoe UI", 13, "bold")).pack(anchor=tk.W)
+        ttk.Label(pl_txt, textvariable=self.player_meta_var, foreground="#888", font=("Segoe UI", 9)).pack(anchor=tk.W)
 
         # --- Status card ---
         status_frame = ttk.LabelFrame(main, text="Status", padding=12)
@@ -494,14 +519,43 @@ class _MainWindow:
             pass
 
 
+def _fetch_whoami(cfg: Config) -> dict | None:
+    """One-shot call to /api/v1/whoami — populates the header player card.
+    Non-fatal: if it fails the header just stays anonymous."""
+    try:
+        r = httpx.get(
+            f"{cfg.server_url}/api/v1/whoami",
+            headers={"Authorization": f"Bearer {cfg.api_token}"},
+            timeout=5.0,
+        )
+        if r.status_code == 200:
+            return r.json()
+        _write_log(f"whoami failed: HTTP {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        _write_log(f"whoami request errored: {e!r}")
+    return None
+
+
 def _run_app(cfg: Config) -> None:
     """Start the watcher thread + system tray + main window. Blocks until
     user quits from tray or File → Quit."""
     thread = UploaderThread(cfg)
     thread.start()
 
-    # tk root — main window lives here
+    # tk root — main window lives here. Apply the dark ttk theme so the app
+    # matches the site's aesthetic instead of defaulting to Windows' beige.
     root = tk.Tk()
+    try:
+        import sv_ttk
+        sv_ttk.set_theme("dark")
+    except Exception as e:
+        # Theme missing (dev environment without sv_ttk) — fall back to
+        # whatever ttk default is available. Not fatal.
+        _write_log(f"sv_ttk theme unavailable: {e!r}")
+
+    # Fetch identity for the header player card. Runs synchronously before
+    # window construction so the card renders populated on first paint.
+    whoami = _fetch_whoami(cfg)
 
     # Tray icon runs detached so tk mainloop can own the main thread
     icon = pystray.Icon(APP_NAME, _make_icon(), title=APP_NAME)
@@ -539,7 +593,7 @@ def _run_app(cfg: Config) -> None:
         pystray.MenuItem("Quit", _quit_tray),
     )
 
-    window = _MainWindow(root, thread, cfg, _quit_all)
+    window = _MainWindow(root, thread, cfg, _quit_all, whoami=whoami)
     icon.run_detached()
 
     try:

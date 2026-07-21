@@ -10,7 +10,7 @@
 # Without excludes the binary would drag in FastAPI, uvicorn, osrparse, etc
 # — bloats the .exe to 200 MB+ for zero benefit. With them it's ~50-70 MB.
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 hiddenimports = [
@@ -18,7 +18,16 @@ hiddenimports = [
     "pystray._win32",
     # Pillow's tkinter integration is dynamic; PyInstaller doesn't always see it.
     "PIL._tkinter_finder",
+    # sv_ttk's theme loader isn't auto-detected on all runners.
+    "sv_ttk",
 ]
+
+
+# sv_ttk ships its theme as loose TCL + PNG assets that live inside its
+# package directory. PyInstaller doesn't grab those by default — collect_
+# data_files walks the package and returns the datas tuples needed to
+# bundle them into the frozen exe so ttk::style commands can find them.
+datas = collect_data_files("sv_ttk")
 
 
 excludes = [
@@ -64,7 +73,7 @@ a = Analysis(
     ["launcher.py"],
     pathex=["../src"],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

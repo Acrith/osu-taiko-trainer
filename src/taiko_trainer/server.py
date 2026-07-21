@@ -1061,6 +1061,32 @@ def create_app(workspace: str) -> FastAPI:
 
     # --- Uploader companion API (bearer token auth) ----------------------
 
+    @app.get("/api/v1/whoami")
+    def api_uploader_whoami(authorization: str | None = Header(default=None)):
+        """Return the user info the bearer token belongs to. Used by the
+        uploader's main window to show a "logged in as …" card without
+        making the user paste their username separately."""
+        raw_token = auth_module.parse_bearer_header(authorization)
+        if not raw_token:
+            raise HTTPException(status_code=401, detail="missing or malformed Authorization header")
+        cat = open_catalog(workspace)
+        user_id = verify_api_token(cat, raw_token)
+        if user_id is None:
+            cat.close()
+            raise HTTPException(status_code=401, detail="token unknown or revoked")
+        user = get_user_by_id(cat, user_id)
+        cat.close()
+        if not user:
+            raise HTTPException(status_code=404, detail="user record missing")
+        return JSONResponse({
+            "osu_user_id": user["osu_user_id"],
+            "osu_username": user["osu_username"],
+            "osu_avatar_url": user["osu_avatar_url"],
+            "osu_cover_url": user["osu_cover_url"],
+            "osu_country_code": user["osu_country_code"],
+            "osu_global_rank": user["osu_global_rank"],
+        })
+
     @app.post("/api/v1/maps")
     async def api_upload_map(
         file: UploadFile = File(...),

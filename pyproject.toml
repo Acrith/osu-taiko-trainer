@@ -16,6 +16,7 @@ dependencies = [
     "watchdog>=4.0",       # replay folder watcher (uploader companion)
     "pystray>=0.19",       # system tray icon (uploader binary GUI)
     "Pillow>=10.0",        # icon image handling for pystray
+    "sv-ttk>=2.6",         # dark ttk theme so the uploader window matches the site
 ]
 
 [project.scripts]
