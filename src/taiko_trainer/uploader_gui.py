@@ -24,7 +24,7 @@ import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import httpx
 from PIL import Image, ImageDraw
@@ -290,89 +290,280 @@ class UploaderThread(threading.Thread):
                     pass
 
 
-# --- Tray icon -------------------------------------------------------------
+# --- Main window + tray ---------------------------------------------------
 
-def _build_menu(uploader: UploaderThread, cfg: Config, quit_fn) -> pystray.Menu:
-    def _open_dashboard(icon, item):
-        webbrowser.open(cfg.server_url)
+class _MainWindow:
+    """The uploader's main window. Shows current status + recent uploads +
+    config + actions. Runs on the tk main thread; polls the worker for
+    updates via after(). Close/minimize hides to tray rather than quitting.
 
-    def _open_settings(icon, item):
-        webbrowser.open(f"{cfg.server_url}/settings/tokens")
+    Shares the same UploaderThread with the tray icon — the tray runs
+    detached in its own thread (see _run_app)."""
 
-    def _open_config_folder(icon, item):
-        # Open the config directory in Explorer
-        import os
-        import subprocess
-        cfg_dir = _config_path().parent
+    def __init__(self, root: tk.Tk, uploader: UploaderThread, cfg: Config, quit_cb):
+        self.root = root
+        self.uploader = uploader
+        self.cfg = cfg
+        self._quit_cb = quit_cb
+        self._state_cache = State(_state_path())  # Read-only shadow for the UI
+        self._build_layout()
+        self._refresh()   # initial render
+        self._schedule_refresh()
+
+    # --- Layout ------------------------------------------------------------
+
+    def _build_layout(self) -> None:
+        self.root.title(APP_NAME)
+        self.root.geometry("720x560")
+        self.root.minsize(640, 480)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        main = ttk.Frame(self.root, padding=14)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        # --- Status card ---
+        status_frame = ttk.LabelFrame(main, text="Status", padding=12)
+        status_frame.pack(fill=tk.X, pady=(0, 12))
+        self.status_var = tk.StringVar(value="…")
+        status_lbl = ttk.Label(status_frame, textvariable=self.status_var, font=("Segoe UI", 14, "bold"))
+        status_lbl.pack(anchor=tk.W)
+        server_lbl = ttk.Label(status_frame, text=self.cfg.server_url, foreground="#666")
+        server_lbl.pack(anchor=tk.W, pady=(2, 8))
+        btn_row = ttk.Frame(status_frame)
+        btn_row.pack(anchor=tk.W)
+        self.pause_btn = ttk.Button(btn_row, text="Pause", command=self._on_pause)
+        self.pause_btn.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_row, text="Open dashboard", command=self._on_open_dashboard).pack(side=tk.LEFT, padx=6)
+
+        # --- Stats row ---
+        stats_frame = ttk.Frame(main)
+        stats_frame.pack(fill=tk.X, pady=(0, 12))
+        self.today_var = tk.StringVar(value="0")
+        self.total_var = tk.StringVar(value="0")
+        self.skipped_var = tk.StringVar(value="0")
+        self._stat_cell(stats_frame, "Uploaded today",   self.today_var).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self._stat_cell(stats_frame, "Uploaded (total)", self.total_var).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
+        self._stat_cell(stats_frame, "Skipped (historic)", self.skipped_var).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
+
+        # --- Recent activity table ---
+        recent_frame = ttk.LabelFrame(main, text="Recent activity", padding=8)
+        recent_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        cols = ("when", "map", "mods", "acc", "status")
+        self.tree = ttk.Treeview(recent_frame, columns=cols, show="headings", height=8)
+        self.tree.heading("when",   text="When")
+        self.tree.heading("map",    text="Map")
+        self.tree.heading("mods",   text="Mods")
+        self.tree.heading("acc",    text="Acc")
+        self.tree.heading("status", text="Status")
+        self.tree.column("when",   width=140, anchor=tk.W)
+        self.tree.column("map",    width=280, anchor=tk.W)
+        self.tree.column("mods",   width=60,  anchor=tk.CENTER)
+        self.tree.column("acc",    width=70,  anchor=tk.E)
+        self.tree.column("status", width=90,  anchor=tk.W)
+        vsb = ttk.Scrollbar(recent_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # --- Config summary + action buttons ---
+        cfg_frame = ttk.LabelFrame(main, text="Config", padding=12)
+        cfg_frame.pack(fill=tk.X)
+        # Token (masked prefix + 8 chars + …)
+        raw_tok = self.cfg.api_token or ""
+        tok_display = f"{raw_tok[:16]}…" if len(raw_tok) > 16 else raw_tok
+        ttk.Label(cfg_frame, text="Token:", foreground="#666").grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(cfg_frame, text=tok_display, font=("Consolas", 10)).grid(row=0, column=1, sticky=tk.W, padx=(8, 8))
+        ttk.Label(cfg_frame, text="Folder:", foreground="#666").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Label(cfg_frame, text=self.cfg.replays_folder, font=("Consolas", 10)).grid(row=1, column=1, sticky=tk.W, padx=(8, 8), pady=(6, 0))
+        cfg_frame.columnconfigure(1, weight=1)
+
+        actions = ttk.Frame(cfg_frame)
+        actions.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(12, 0))
+        ttk.Button(actions, text="Change folder", command=self._on_change_folder).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(actions, text="Change token",  command=self._on_change_token).pack(side=tk.LEFT, padx=6)
+        ttk.Button(actions, text="Open log",       command=self._on_open_log).pack(side=tk.LEFT, padx=6)
+        ttk.Button(actions, text="Hide to tray",   command=self._on_close).pack(side=tk.RIGHT)
+
+    def _stat_cell(self, parent, label: str, var: tk.StringVar) -> ttk.Frame:
+        f = ttk.Frame(parent, borderwidth=1, relief="solid", padding=10)
+        ttk.Label(f, text=label, foreground="#666", font=("Segoe UI", 9)).pack(anchor=tk.W)
+        ttk.Label(f, textvariable=var,          font=("Segoe UI", 18, "bold")).pack(anchor=tk.W)
+        return f
+
+    # --- Data refresh ------------------------------------------------------
+
+    def _refresh(self) -> None:
+        # Status label + pause button
+        self.status_var.set(self.uploader.status_msg)
+        self.pause_btn.configure(text=("Resume" if self.uploader.is_paused() else "Pause"))
+        # Stats
         try:
-            os.startfile(str(cfg_dir))
+            s = self._state_cache.stats()
         except Exception:
-            subprocess.Popen(["explorer", str(cfg_dir)])
+            s = {"total": 0, "uploaded": 0, "skipped_historic": 0}
+        self.today_var.set(str(self.uploader.uploads_today))
+        self.total_var.set(str(s.get("uploaded", 0)))
+        self.skipped_var.set(str(s.get("skipped_historic", 0)))
+        # Recent activity table
+        self.tree.delete(*self.tree.get_children())
+        try:
+            rows = self._state_cache.recent(limit=50)
+        except Exception:
+            rows = []
+        for r in rows:
+            when   = (r.get("uploaded_at") or "")[:19].replace("T", " ")
+            title  = r.get("map_title")   or "?"
+            ver    = r.get("map_version") or ""
+            mods   = r.get("mods")        or "NM"
+            acc    = r.get("accuracy")
+            acc_s  = f"{acc*100:.2f}%" if isinstance(acc, (int, float)) else "—"
+            status = "uploaded" if r.get("replay_id") else "failed"
+            self.tree.insert(
+                "", tk.END,
+                values=(when, f"{title} [{ver}]" if ver else title, mods, acc_s, status),
+            )
 
-    def _open_log(icon, item):
-        import os
-        import subprocess
-        log_p = _log_path()
-        # Ensure the file exists so notepad doesn't 404
-        if not log_p.exists():
+    def _schedule_refresh(self) -> None:
+        self.root.after(1000, self._tick)
+
+    def _tick(self) -> None:
+        self._refresh()
+        self._schedule_refresh()
+
+    # --- Actions -----------------------------------------------------------
+
+    def _on_pause(self) -> None:
+        if self.uploader.is_paused():
+            self.uploader.resume()
+        else:
+            self.uploader.pause()
+        self._refresh()
+
+    def _on_open_dashboard(self) -> None:
+        webbrowser.open(self.cfg.server_url)
+
+    def _on_open_log(self) -> None:
+        import os as _os
+        import subprocess as _sp
+        p = _log_path()
+        if not p.exists():
             _write_log("(log opened — no prior entries)")
         try:
-            os.startfile(str(log_p))
+            _os.startfile(str(p))
         except Exception:
-            try:
-                subprocess.Popen(["notepad", str(log_p)])
-            except Exception:
-                # Fall back to Explorer at the containing dir
-                subprocess.Popen(["explorer", str(log_p.parent)])
+            _sp.Popen(["notepad", str(p)])
 
-    def _toggle_pause(icon, item):
-        if uploader.is_paused():
-            uploader.resume()
-        else:
-            uploader.pause()
-        icon.update_menu()
+    def _on_change_folder(self) -> None:
+        new = filedialog.askdirectory(title="Choose your osu! replays folder", initialdir=self.cfg.replays_folder)
+        if not new:
+            return
+        # Persist to config file. Watcher won't automatically re-target —
+        # user has to restart. Warn them.
+        write_config(Config(server_url=self.cfg.server_url, api_token=self.cfg.api_token, replays_folder=new))
+        messagebox.showinfo(APP_NAME, f"Folder saved to config:\n{new}\n\nRestart the uploader for the change to take effect.")
 
-    def _pause_label(item):
-        return "Resume" if uploader.is_paused() else "Pause"
+    def _on_change_token(self) -> None:
+        new = simpledialog.askstring(
+            APP_NAME,
+            "New API token (paste from /settings/tokens on the server):",
+            initialvalue="",
+        )
+        if not new or not new.strip():
+            return
+        write_config(Config(server_url=self.cfg.server_url, api_token=new.strip(), replays_folder=self.cfg.replays_folder))
+        messagebox.showinfo(APP_NAME, "Token saved.\n\nRestart the uploader for the change to take effect.")
 
-    return pystray.Menu(
-        pystray.MenuItem(
-            lambda item: f"Status: {uploader.status_msg}",
-            None, enabled=False,
-        ),
-        pystray.MenuItem(
-            lambda item: f"Uploaded today: {uploader.uploads_today}",
-            None, enabled=False,
-        ),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem(_pause_label, _toggle_pause),
-        pystray.MenuItem("Open dashboard", _open_dashboard),
-        pystray.MenuItem("Settings (browser)", _open_settings),
-        pystray.MenuItem("Open config folder", _open_config_folder),
-        pystray.MenuItem("Open log file", _open_log),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Quit", quit_fn),
-    )
+    def _on_close(self) -> None:
+        """Hide to tray (window keeps running in background)."""
+        self.root.withdraw()
+
+    def show(self) -> None:
+        """Called from the tray menu to restore the window."""
+        self.root.after(0, self._do_show)
+
+    def _do_show(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def shutdown(self) -> None:
+        """Called on Quit — close state cache before tk destroys widgets."""
+        try:
+            self._state_cache.close()
+        except Exception:
+            pass
 
 
-def _run_tray(cfg: Config) -> None:
-    """Start the watcher thread + system tray. Blocks until user quits.
-    State DB is owned by the worker thread — see UploaderThread.run()."""
+def _run_app(cfg: Config) -> None:
+    """Start the watcher thread + system tray + main window. Blocks until
+    user quits from tray or File → Quit."""
     thread = UploaderThread(cfg)
     thread.start()
 
-    icon = pystray.Icon(APP_NAME, _make_icon(), title=APP_NAME)
+    # tk root — main window lives here
+    root = tk.Tk()
 
-    def _quit(icon_, item):
+    # Tray icon runs detached so tk mainloop can own the main thread
+    icon = pystray.Icon(APP_NAME, _make_icon(), title=APP_NAME)
+    window: _MainWindow | None = None
+
+    def _quit_all():
+        # Called from tray Quit or window close-forever action
         thread.stop()
+        try:
+            if window is not None:
+                window.shutdown()
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
         icon.stop()
 
-    icon.menu = _build_menu(thread, cfg, _quit)
-    icon.run()
+    def _quit_tray(icon_, item):
+        _quit_all()
 
-    # After icon.run() returns (user quit), give the thread a moment to wind down.
-    thread.stop()
-    thread.join(timeout=3.0)
+    def _show(icon_, item):
+        if window is not None:
+            window.show()
+
+    icon.menu = pystray.Menu(
+        pystray.MenuItem(lambda i: f"Status: {thread.status_msg}", None, enabled=False),
+        pystray.MenuItem(lambda i: f"Uploaded today: {thread.uploads_today}", None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Show window", _show, default=True),
+        pystray.MenuItem("Open dashboard", lambda i, it: webbrowser.open(cfg.server_url)),
+        pystray.MenuItem("Open log file", lambda i, it: _open_log_external()),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Quit", _quit_tray),
+    )
+
+    window = _MainWindow(root, thread, cfg, _quit_all)
+    icon.run_detached()
+
+    try:
+        root.mainloop()
+    finally:
+        thread.stop()
+        thread.join(timeout=3.0)
+        try:
+            icon.stop()
+        except Exception:
+            pass
+
+
+def _open_log_external() -> None:
+    """Open the log file for the tray's Open log menu item."""
+    import os
+    import subprocess
+    p = _log_path()
+    if not p.exists():
+        _write_log("(log opened — no prior entries)")
+    try:
+        os.startfile(str(p))
+    except Exception:
+        subprocess.Popen(["notepad", str(p)])
 
 
 # --- Entrypoint ------------------------------------------------------------
@@ -399,7 +590,7 @@ def main() -> int:
         _fatal_dialog(f"Startup check failed:\n\n{e}\n\nEdit or delete the config and try again:\n{_config_path()}")
         return 3
 
-    _run_tray(cfg)
+    _run_app(cfg)
     return 0
 
 
