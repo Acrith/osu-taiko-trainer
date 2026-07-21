@@ -1,19 +1,15 @@
 <script>
-  import { currentScreen, whoami } from "./stores.js";
+  import { currentScreen } from "./stores.js";
 
   const items = [
     { key: "home",     label: "Home"     },
-    { key: "import",   label: "Import"   },
-    { key: "uploads",  label: "Uploads"  },
+    { key: "replays",  label: "Replays"  },
     { key: "settings", label: "Settings" },
     { key: "about",    label: "About"    },
   ];
 
   let screen = $state("home");
   currentScreen.subscribe(v => (screen = v));
-
-  let identity = $state(null);
-  whoami.subscribe(v => (identity = v));
 </script>
 
 <aside class="sidebar">
@@ -36,18 +32,6 @@
   </nav>
 
   <div class="spacer"></div>
-
-  {#if identity}
-    <div class="identity">
-      <div class="identity-name">{identity.username}</div>
-      <div class="identity-sub">signed in · #{identity.user_id}</div>
-    </div>
-  {:else}
-    <div class="identity">
-      <div class="identity-name identity-name-anon">not signed in</div>
-      <div class="identity-sub">set token in Settings</div>
-    </div>
-  {/if}
 
   <div class="version">v0.2.0 · tauri</div>
 </aside>
@@ -118,26 +102,6 @@
     font-weight: 500;
   }
   .spacer { flex: 1; }
-
-  .identity {
-    padding: 10px 4px;
-    border-top: 1px solid var(--rule);
-  }
-  .identity-name {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--ink);
-    font-weight: 500;
-  }
-  .identity-name-anon { color: var(--ink-muted); }
-  .identity-sub {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--ink-faint);
-    margin-top: 2px;
-  }
   .version {
     font-family: var(--font-mono);
     font-size: 10px;

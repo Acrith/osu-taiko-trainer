@@ -1108,6 +1108,79 @@ def create_app(workspace: str) -> FastAPI:
             "style":         style,
         })
 
+    @app.get("/api/v1/me/skill")
+    def api_uploader_my_skill(authorization: str | None = Header(default=None)):
+        """Return the authenticated user's current skill snapshot + total-
+        skill rank on the leaderboard. Used by the uploader's Home screen
+        to render a leaderboard-row-style band so users see their own
+        stats without opening the site."""
+        raw_token = auth_module.parse_bearer_header(authorization)
+        if not raw_token:
+            raise HTTPException(status_code=401, detail="missing or malformed Authorization header")
+        cat = open_catalog(workspace)
+        user_id = verify_api_token(cat, raw_token)
+        if user_id is None:
+            cat.close()
+            raise HTTPException(status_code=401, detail="token unknown or revoked")
+        user = get_user_by_id(cat, user_id)
+        cat.close()
+        if not user:
+            raise HTTPException(status_code=404, detail="user record missing")
+
+        _DIMS = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
+        my_username = user["osu_username"]
+
+        # Rank against the total-skill leaderboard. limit=10_000 keeps this
+        # bounded even as the user base grows; below that the user just
+        # reports rank=None ("unranked") rather than a fake position.
+        board = top_users_by_skill(workspace, "total", limit=10_000)
+        my_row: dict | None = None
+        my_rank: int | None = None
+        for i, r in enumerate(board):
+            if r["osu_username"] == my_username:
+                my_row = r
+                my_rank = i + 1
+                break
+
+        # Private-profile or fresh users won't appear on the board but
+        # still have a snapshot — read the DB directly so the Home band
+        # renders for THEM too, just without a rank number.
+        if my_row is None:
+            from .db import player_db_path
+            p = player_db_path(workspace, my_username)
+            if p.exists():
+                try:
+                    with sqlite3.connect(str(p)) as conn:
+                        conn.row_factory = sqlite3.Row
+                        snap = conn.execute(
+                            "SELECT skill_speed, skill_stamina, skill_gimmick, "
+                            "skill_technical, skill_consistency, skill_reading, "
+                            "replays_used FROM snapshots ORDER BY id DESC LIMIT 1"
+                        ).fetchone()
+                        if snap:
+                            row = {d: float(snap[f"skill_{d}"] or 0) for d in _DIMS}
+                            row["replays"] = int(snap["replays_used"])
+                            row["total"] = sum(row[d] for d in _DIMS)
+                            my_row = row
+                except Exception:
+                    pass
+
+        if my_row is None:
+            return JSONResponse({"has_data": False})
+
+        return JSONResponse({
+            "has_data":    True,
+            "rank":        my_rank,
+            "replays":     int(my_row.get("replays", 0) or 0),
+            "speed":       float(my_row["speed"]),
+            "stamina":     float(my_row["stamina"]),
+            "gimmick":     float(my_row["gimmick"]),
+            "technical":   float(my_row["technical"]),
+            "consistency": float(my_row["consistency"]),
+            "reading":     float(my_row["reading"]),
+            "total":       float(my_row["total"]),
+        })
+
     @app.post("/api/v1/maps")
     async def api_upload_map(
         file: UploadFile = File(...),

@@ -471,7 +471,11 @@ fn emit_activity(
             mods: mods.map(String::from),
             accuracy,
             status,
-            at: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            // Full RFC 3339 so the frontend can format the date + time
+            // however it wants; sending just HH:MM:SS made yesterday's
+            // rows look identical to today's on the recent-activity
+            // table.
+            at: chrono::Utc::now().to_rfc3339(),
         },
     );
 }

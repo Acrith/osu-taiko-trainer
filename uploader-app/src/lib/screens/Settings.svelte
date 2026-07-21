@@ -85,7 +85,7 @@
   <h1 class="title">Config</h1>
 
   <div class="field">
-    <label class="k" for="tok">API token</label>
+    <label class="k" for="tok">Uploader token</label>
     <input
       id="tok"
       class="v mono"
@@ -94,9 +94,16 @@
       placeholder="tt_uploader_…"
       autocomplete="off"
     />
-    <div class="hint">Get one at
+    <div class="hint">
+      Mint one at
       <button class="linkbtn" onclick={() => openUrl(`${srvDefault}/settings/tokens`)}
       >{srvDefault}/settings/tokens</button>.
+    </div>
+    <div class="warn">
+      <b>Not</b> your osu! API key — this is a token issued by
+      taiko-trainer specifically for this uploader. Don't share, screenshot,
+      or export it: anyone with this token can upload replays as you.
+      Revoke + regenerate on the site if it leaks.
     </div>
   </div>
 
@@ -115,8 +122,8 @@
     </div>
   </div>
 
-  <div class="field">
-    <label class="k" for="srv">Server URL</label>
+  <div class="field advanced">
+    <label class="k" for="srv">Server URL <span class="k-tag mono">advanced</span></label>
     <input
       id="srv"
       class="v mono"
@@ -124,7 +131,15 @@
       bind:value={form.server_url}
       placeholder={srvDefault}
     />
-    <div class="hint">Leave blank to use the default ({srvDefault}). Change only for local development.</div>
+    <div class="hint">
+      Blank uses the default: <b>{srvDefault}</b>.
+    </div>
+    <div class="warn warn-light">
+      Only change this if you're running the taiko-trainer server yourself
+      (localhost development). Pointing it at any other URL sends your
+      replays somewhere the uploader wasn't designed for, and the token
+      won't authenticate anywhere else — so you'd just see auth errors.
+    </div>
   </div>
 
   <div class="field">
@@ -237,6 +252,33 @@
     text-decoration: none;
   }
   .linkbtn:hover { text-decoration: underline; }
+
+  .warn {
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft);
+    color: var(--ink);
+    padding: 10px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.55;
+    margin-top: 10px;
+  }
+  .warn b { color: var(--accent); }
+  .warn-light {
+    background: color-mix(in oklab, var(--ok) 12%, transparent);
+    border-color: color-mix(in oklab, var(--ok) 30%, transparent);
+  }
+  .warn-light b { color: var(--ok); }
+  .k-tag {
+    background: color-mix(in oklab, var(--ink-faint) 20%, transparent);
+    color: var(--ink-muted);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    margin-left: 8px;
+    vertical-align: 1px;
+  }
   .msg {
     margin-top: 16px;
     padding: 10px 14px;

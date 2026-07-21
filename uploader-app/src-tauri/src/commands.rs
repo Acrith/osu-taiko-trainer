@@ -85,6 +85,19 @@ pub async fn fetch_whoami() -> Result<Option<http::Whoami>, String> {
     Ok(http::whoami(&client, &cfg).await)
 }
 
+/// Fetch the current user's skill snapshot for the Home leaderboard band.
+/// None means either no config or the server was unreachable — the
+/// frontend keeps its last-known value in either case.
+#[tauri::command]
+pub async fn fetch_my_skill() -> Result<Option<http::MySkill>, String> {
+    let cfg = match config::load()? {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let client = http::build_client();
+    Ok(http::my_skill(&client, &cfg).await)
+}
+
 /// Kick off a one-shot backfill of every `.osr` in the folder that hasn't
 /// already been uploaded. Explicit user action — never fires by itself.
 #[tauri::command]

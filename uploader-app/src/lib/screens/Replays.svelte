@@ -131,9 +131,9 @@
 </script>
 
 <div class="page">
-  <div class="eyebrow">Import</div>
+  <div class="eyebrow">Replays</div>
   <div class="head">
-    <h1 class="title">Replays folder</h1>
+    <h1 class="title">Files in your replays folder</h1>
     <button class="btn" onclick={refresh} disabled={loading}>
       {loading ? "Scanning…" : "Refresh"}
     </button>

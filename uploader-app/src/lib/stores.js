@@ -21,6 +21,12 @@ export const status = writable({
 // GET /api/v1/whoami result, populated on startup + after token change.
 export const whoami = writable(null);
 
+// GET /api/v1/me/skill — the leaderboard-band data shown on Home.
+// Payload shape: { has_data, rank, replays, speed, stamina, gimmick,
+// technical, consistency, reading, total }. null before first fetch,
+// { has_data: false } when the user has no rateable plays yet.
+export const mySkill = writable(null);
+
 // The Config the daemon is running with. Editable from Settings.
 export const config = writable(null);
 

@@ -123,6 +123,34 @@ pub struct Whoami {
     pub server_url: Option<String>,
 }
 
+/// The Home leaderboard-band payload — the user's current skill snapshot
+/// plus their rank on the total-skill leaderboard.
+///
+/// `has_data` is false for fresh users who haven't uploaded any rateable
+/// replays yet; frontend renders an empty-state prompt in that case.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MySkill {
+    pub has_data: bool,
+    #[serde(default)]
+    pub rank: Option<i64>,
+    #[serde(default)]
+    pub replays: Option<i64>,
+    #[serde(default)]
+    pub speed: Option<f64>,
+    #[serde(default)]
+    pub stamina: Option<f64>,
+    #[serde(default)]
+    pub gimmick: Option<f64>,
+    #[serde(default)]
+    pub technical: Option<f64>,
+    #[serde(default)]
+    pub consistency: Option<f64>,
+    #[serde(default)]
+    pub reading: Option<f64>,
+    #[serde(default)]
+    pub total: Option<f64>,
+}
+
 /// GET /api/v1/whoami with the bearer token. Returns None if the server
 /// doesn't recognize the token (401), the endpoint isn't there (404), or
 /// the network fails. Callers treat None as "identity unknown, show
@@ -143,6 +171,23 @@ pub async fn whoami(client: &Client, cfg: &Config) -> Option<Whoami> {
         who.server_url = Some(cfg.server_url.clone());
     }
     Some(who)
+}
+
+/// GET /api/v1/me/skill — the authenticated user's skill snapshot + rank.
+/// Returns None on network error or non-2xx (frontend treats that as
+/// "not available right now", keeps last-known value in the store).
+pub async fn my_skill(client: &Client, cfg: &Config) -> Option<MySkill> {
+    let resp = client
+        .get(format!("{}/api/v1/me/skill", cfg.server_url))
+        .header("Authorization", format!("Bearer {}", cfg.api_token))
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<MySkill>().await.ok()
 }
 
 /// One reqwest client we reuse for the whole session — connection pooling,

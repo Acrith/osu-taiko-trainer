@@ -63,6 +63,7 @@ pub fn run() {
                 commands::get_current_status,
                 commands::get_recent,
                 commands::fetch_whoami,
+                commands::fetch_my_skill,
                 commands::backfill,
                 commands::list_folder_entries,
                 commands::upload_files,

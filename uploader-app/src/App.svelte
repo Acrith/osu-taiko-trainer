@@ -4,21 +4,19 @@
   import { listen } from "@tauri-apps/api/event";
   import Sidebar from "./lib/Sidebar.svelte";
   import Home from "./lib/screens/Home.svelte";
-  import Import from "./lib/screens/Import.svelte";
-  import Uploads from "./lib/screens/Uploads.svelte";
+  import Replays from "./lib/screens/Replays.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import About from "./lib/screens/About.svelte";
   import {
     currentScreen, status, whoami, config, recentActivity, stats,
-    defaultServerUrl,
+    defaultServerUrl, mySkill,
   } from "./lib/stores.js";
 
   let screen = $state("home");
   currentScreen.subscribe(v => (screen = v));
 
   onMount(async () => {
-    // Prime the stores with the current daemon snapshot. Each invoke is
-    // parallelizable — they don't depend on each other.
+    // Prime the stores in parallel — each invoke is independent.
     const [cfg, srv, initStats, initRecent] = await Promise.all([
       invoke("get_config").catch(() => null),
       invoke("default_server_url").catch(() => "https://taiko.umaladder.moe"),
@@ -30,11 +28,10 @@
     if (initStats) stats.set(initStats);
     if (initRecent) recentActivity.set(initRecent.map(rowFromRust));
 
-    // Whoami is best-effort; may return null if no config or no network.
+    // Network-dependent fetches — fire in parallel, don't block startup.
     invoke("fetch_whoami").then(w => whoami.set(w)).catch(() => {});
+    invoke("fetch_my_skill").then(s => mySkill.set(s)).catch(() => {});
 
-    // Subscribe to worker events. These fire whenever the Rust side
-    // pushes state changes.
     const unlisten = await Promise.all([
       listen("status-changed", ev => status.set(ev.payload)),
       listen("stats-changed",  ev => stats.set(ev.payload)),
@@ -45,18 +42,30 @@
       listen("whoami-changed", ev => whoami.set(ev.payload)),
     ]);
 
-    // Pull the current status AFTER attaching the listener. If the worker
-    // emitted "watching" before we finished setting up (small race window
-    // during startup), the event was lost — but this invoke gets us the
-    // stored value, so the sidebar/Home never end up permanently stuck
-    // on "Starting" just because we lost the transition event.
+    // Pull the current status AFTER attaching the listener so we can't
+    // miss the "watching" transition even if it fires before the JS
+    // side finishes subscribing.
     const cur = await invoke("get_current_status").catch(() => null);
     if (cur) status.set(cur);
 
-    return () => unlisten.forEach(fn => fn());
+    // Refresh skill data whenever a new upload completes — the server
+    // recomputes the snapshot after each replay lands, so the Home
+    // leaderboard band should reflect it within a couple seconds.
+    let skillRefreshQueued = null;
+    const unlistenSkill = await listen("activity-added", () => {
+      clearTimeout(skillRefreshQueued);
+      skillRefreshQueued = setTimeout(() => {
+        invoke("fetch_my_skill").then(s => mySkill.set(s)).catch(() => {});
+      }, 1500);
+    });
+
+    return () => {
+      clearTimeout(skillRefreshQueued);
+      unlistenSkill();
+      unlisten.forEach(fn => fn());
+    };
   });
 
-  // Convert a Rust state::Record into the row shape the Uploads table expects.
   function rowFromRust(r) {
     return {
       id: r.filename,
@@ -65,10 +74,9 @@
       mods: r.mods,
       accuracy: r.accuracy,
       status: r.replay_id ? "uploaded" : (r.map_title === "SKIPPED_HISTORIC" ? "skipped" : "failed"),
-      at: r.uploaded_at?.slice(11, 16) ?? "",
+      at: r.uploaded_at,  // full ISO / SQLite datetime — formatted at render time
     };
   }
-  // Convert a live activity event payload similarly.
   function rowFromActivity(a) {
     return {
       id: `${a.file_name}-${a.at}`,
@@ -87,10 +95,8 @@
   <main class="stage">
     {#if screen === "home"}
       <Home />
-    {:else if screen === "import"}
-      <Import />
-    {:else if screen === "uploads"}
-      <Uploads />
+    {:else if screen === "replays"}
+      <Replays />
     {:else if screen === "settings"}
       <Settings />
     {:else if screen === "about"}
