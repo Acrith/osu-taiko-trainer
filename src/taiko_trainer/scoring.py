@@ -502,12 +502,27 @@ def rate_map(
     pressure = _od_pressure(od, od_mult=od_mult, hit_window_mult=hit_window_mult)
     cons_mult = 1.0 + _OD_BOOST_K_CONSISTENCY * (pressure - 1.0)
     tech_mult = 1.0 + _OD_BOOST_K_TECHNICAL   * (pressure - 1.0)
+
+    # Consistency challenge floor. Every ingredient the consistency formula
+    # rewards — duration, uniform density, easy divisors, off-grid simplicity,
+    # BPM stability — can be maxed out by a map with literally no accuracy
+    # pressure. Trash Stream [Please] is 10 minutes at 120 BPM with 100% 1/1
+    # divisor (2 notes/sec peak, 0.2 NPS sustained); the formula scored it
+    # 1697 consistency because it ticked every box for "uniform easy content."
+    # Player skill demonstrated: staying awake.
+    #
+    # Gate consistency by how dense the map is at its most demanding stretch:
+    # if peak_nps_5s < 2, there's no meaningful challenge to hold accuracy
+    # through. Reference consistency map (Dynasty) sits at peak_nps_5s = 12,
+    # and every reference map above 8, so anchor (2, 6) preserves legit
+    # content while zeroing exploits.
+    cons_floor = _norm(features.density.peak_nps_5s, 2.0, 6.0)
     return DimensionRating(
         speed=_shape(_raw_speed(features)) * bonus,
         stamina=_shape(_raw_stamina(features, style=style)) * bonus,
         gimmick=_shape(_raw_gimmick(features)) * bonus,
         technical=_shape(_raw_technical(features, style=style)) * bonus * tech_mult,
-        consistency=_shape(_raw_consistency(features)) * bonus * cons_mult,
+        consistency=_shape(_raw_consistency(features)) * bonus * cons_mult * cons_floor,
         # Reading is shaped per-side so HD's asymmetric mults (fast 1.25×,
         # slow 1.75×) land at the rating level rather than getting squared
         # by _shape. Sum-then-shape (via _raw_reading) would give 1.56× and
