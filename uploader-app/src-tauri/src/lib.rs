@@ -70,6 +70,10 @@ pub fn run() {
                 commands::backfill,
                 commands::list_folder_entries,
                 commands::upload_files,
+                commands::read_log,
+                commands::log_folder_path,
+                commands::test_connection,
+                commands::restart_watcher,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");

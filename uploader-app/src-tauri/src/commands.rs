@@ -85,6 +85,83 @@ pub async fn fetch_whoami() -> Result<Option<http::Whoami>, String> {
     Ok(http::whoami(&client, &cfg).await)
 }
 
+/// Read the tail of `~/.taiko-trainer/uploader.log`. `lines` bounds the
+/// return so a multi-megabyte log doesn't have to cross the IPC boundary
+/// or clog the UI. Default matches roughly a day of typical logging.
+#[tauri::command]
+pub fn read_log(lines: Option<usize>) -> Result<String, String> {
+    let path = config::log_path();
+    if !path.exists() {
+        return Ok(String::from("(no log file yet — one will appear after the first watcher run)"));
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let n = lines.unwrap_or(500);
+    let all: Vec<&str> = content.lines().collect();
+    let start = all.len().saturating_sub(n);
+    let tail = &all[start..];
+    // Prefix with a marker so users pasting the log into a bug report
+    // know it's the recent slice rather than the whole file.
+    if start > 0 {
+        Ok(format!("... ({} earlier lines omitted)\n{}", start, tail.join("\n")))
+    } else {
+        Ok(tail.join("\n"))
+    }
+}
+
+/// The directory the log + config + state DB all live in. Frontend calls
+/// this to build an "Open folder" button that pops the OS file browser
+/// at that path via plugin-opener.
+#[tauri::command]
+pub fn log_folder_path() -> String {
+    config::config_dir().to_string_lossy().to_string()
+}
+
+#[derive(serde::Serialize)]
+pub struct TestResult {
+    pub ok: bool,
+    pub kind: &'static str, // "authenticated" | "unauth" | "network" | "no_config"
+    pub message: String,
+    pub username: Option<String>,
+}
+
+/// Hit /api/v1/whoami with the currently-saved token so the user can
+/// verify their config works without playing a map.
+#[tauri::command]
+pub async fn test_connection() -> Result<TestResult, String> {
+    let cfg = match config::load()? {
+        Some(c) => c,
+        None => return Ok(TestResult {
+            ok: false, kind: "no_config", username: None,
+            message: "Save a token + folder first — nothing to test yet.".into(),
+        }),
+    };
+    let client = http::build_client();
+    match http::whoami(&client, &cfg).await {
+        Some(who) => Ok(TestResult {
+            ok: true, kind: "authenticated", username: Some(who.username.clone()),
+            message: format!("Authenticated as {} · server reachable", who.username),
+        }),
+        None => Ok(TestResult {
+            ok: false, kind: "unauth", username: None,
+            message: format!("Server didn't accept the token at {}. Either the token is wrong / revoked, or the server URL is bad.", cfg.server_url),
+        }),
+    }
+}
+
+/// Tell the worker to re-read config + restart the watcher loop without
+/// touching the saved token/folder. Useful when the server was down
+/// during launch or the folder just became available (mounted network
+/// share, etc.).
+#[tauri::command]
+pub async fn restart_watcher(app_state: TauriState<'_, AppState>) -> Result<(), String> {
+    app_state
+        .worker_tx
+        .send(WorkerCmd::Reload)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Fetch the current user's skill snapshot for the Home leaderboard band.
 /// None means either no config or the server was unreachable — the
 /// frontend keeps its last-known value in either case.

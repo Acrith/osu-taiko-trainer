@@ -1,7 +1,7 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
-  import { open } from "@tauri-apps/plugin-dialog";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { open as openPicker } from "@tauri-apps/plugin-dialog";
+  import { openUrl, openPath } from "@tauri-apps/plugin-opener";
   import { config, defaultServerUrl } from "../stores.js";
 
   let cfg = $state(null);
@@ -33,12 +33,81 @@
   });
 
   async function pickFolder() {
-    const chosen = await open({
+    const chosen = await openPicker({
       directory: true,
       multiple: false,
       title: "Pick your osu! replays folder",
     });
     if (typeof chosen === "string") form.replays_folder = chosen;
+  }
+
+  // --- Diagnostics section state ------------------------------------------
+  let testResult = $state(null);
+  let testing    = $state(false);
+  let restartMsg = $state(null);
+  let restarting = $state(false);
+  let logOpen    = $state(false);
+  let logText    = $state("");
+  let logLoading = $state(false);
+
+  async function testConnection() {
+    testing = true;
+    testResult = null;
+    try {
+      testResult = await invoke("test_connection");
+    } catch (e) {
+      testResult = { ok: false, kind: "error", message: String(e) };
+    } finally {
+      testing = false;
+    }
+  }
+
+  async function restartWatcher() {
+    restarting = true;
+    restartMsg = null;
+    try {
+      await invoke("restart_watcher");
+      restartMsg = { level: "ok", text: "Watcher restart signal sent. See Home for status." };
+    } catch (e) {
+      restartMsg = { level: "err", text: String(e) };
+    } finally {
+      restarting = false;
+    }
+  }
+
+  async function toggleLog() {
+    if (logOpen) { logOpen = false; return; }
+    logOpen = true;
+    await refreshLog();
+  }
+
+  async function refreshLog() {
+    logLoading = true;
+    try {
+      logText = await invoke("read_log", { lines: 500 });
+    } catch (e) {
+      logText = `Failed to read log: ${e}`;
+    } finally {
+      logLoading = false;
+    }
+  }
+
+  async function copyLog() {
+    try {
+      await navigator.clipboard.writeText(logText);
+      restartMsg = { level: "ok", text: "Log copied to clipboard." };
+    } catch {
+      restartMsg = { level: "err", text: "Clipboard access failed — select + Ctrl+C manually." };
+    }
+  }
+
+  async function openLogFolder() {
+    try {
+      const p = await invoke("log_folder_path");
+      await openPath(p);
+    } catch (e) {
+      restartMsg = { level: "err", text: `Couldn't open log folder: ${e}` };
+    }
   }
 
   async function detect() {
@@ -165,6 +234,47 @@
   {#if saveMsg}
     <div class="msg msg-{saveMsg.level}">{saveMsg.text}</div>
   {/if}
+
+  <!-- Diagnostics: connection test, watcher control, log viewer.
+       Sits below the config so someone reporting a bug has one place to
+       generate the info we need: hit Test → copy the result, hit Show
+       log → Copy log → paste both. -->
+  <h2 class="section-title">Diagnostics</h2>
+
+  <div class="diag-row">
+    <button class="btn" onclick={testConnection} disabled={testing}>
+      {testing ? "Testing…" : "Test connection"}
+    </button>
+    <button class="btn" onclick={restartWatcher} disabled={restarting}>
+      {restarting ? "Restarting…" : "Restart watcher"}
+    </button>
+    <button class="btn" onclick={toggleLog}>
+      {logOpen ? "Hide log" : "Show log"}
+    </button>
+    <button class="btn ghost" onclick={openLogFolder}>Open folder</button>
+  </div>
+
+  {#if testResult}
+    <div class="msg msg-{testResult.ok ? 'ok' : 'err'}">{testResult.message}</div>
+  {/if}
+  {#if restartMsg}
+    <div class="msg msg-{restartMsg.level}">{restartMsg.text}</div>
+  {/if}
+
+  {#if logOpen}
+    <div class="log-panel">
+      <div class="log-head">
+        <span class="eyebrow">uploader.log · last 500 lines</span>
+        <div class="log-actions">
+          <button class="btn ghost small" onclick={refreshLog} disabled={logLoading}>
+            {logLoading ? "…" : "Refresh"}
+          </button>
+          <button class="btn ghost small" onclick={copyLog}>Copy</button>
+        </div>
+      </div>
+      <pre class="log-body">{logText || "(empty)"}</pre>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -278,6 +388,61 @@
     letter-spacing: 0.14em;
     margin-left: 8px;
     vertical-align: 1px;
+  }
+
+  .section-title {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 14px;
+    letter-spacing: 0.06em;
+    color: var(--ink);
+    margin: 32px 0 10px 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--rule);
+  }
+  .diag-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .btn.small { padding: 4px 10px; font-size: 10px; }
+
+  .log-panel {
+    margin-top: 16px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .log-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .log-actions {
+    display: flex;
+    gap: 4px;
+  }
+  .log-body {
+    margin: 0;
+    padding: 12px;
+    max-height: 360px;
+    overflow: auto;
+    background: color-mix(in oklab, black 20%, var(--panel));
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    /* User needs to be able to select the text — override the app-wide
+       user-select:none from app.css that prevents accidental drag-select
+       on the rest of the UI. */
+    user-select: text;
+    -webkit-user-select: text;
   }
   .msg {
     margin-top: 16px;

@@ -1,7 +1,9 @@
 <script>
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { invoke } from "@tauri-apps/api/core";
   import {
     status, stats, whoami, config, mySkill, recentActivity, myReplays,
+    currentScreen,
   } from "../stores.js";
 
   let s = $state({ state: "starting", message: "Starting…", since: null });
@@ -85,6 +87,42 @@
   }
 
   const recentTop = $derived(activity.slice(0, 8));
+
+  // Classify the error message into a "kind" so the error card can
+  // show a targeted explanation + CTA. Message-string sniffing is
+  // brittle but avoids a schema change on StatusPayload — the worker
+  // constructs these strings and they're in one place, so if we ever
+  // want strict kinds we swap this for a real enum field.
+  function classifyError(msg) {
+    const m = (msg ?? "").toLowerCase();
+    if (m.includes("token unauthorized") || m.includes("unauth") || m.includes("token")) return "auth";
+    if (m.includes("folder not found") || m.includes("no such file") || m.includes("is not a dir")) return "folder";
+    if (m.includes("http") || m.includes("network") || m.includes("timed out") || m.includes("timeout") || m.includes("connect")) return "network";
+    if (m.includes("config error")) return "config";
+    return "unknown";
+  }
+
+  const errorKind = $derived(s.state === "error" ? classifyError(s.message) : null);
+
+  const ERROR_TITLES = {
+    auth:    "Token rejected",
+    folder:  "Replays folder unreachable",
+    network: "Server unreachable",
+    config:  "Config problem",
+    unknown: "Something went wrong",
+  };
+  const ERROR_EXPLAINS = {
+    auth:    "The server didn't accept your uploader token. Most common causes: token was revoked, regenerated, or copied incorrectly. Mint a fresh one and paste it into Settings.",
+    folder:  "The folder in Settings doesn't exist right now. Common causes: osu! isn't installed at that path, the folder was renamed, a network drive isn't mounted. Fix the path or make sure the drive is available.",
+    network: "Couldn't reach the server. Common causes: no internet, VPN issue, server is down. The uploader retries automatically — this message just means the last attempt failed.",
+    config:  "The uploader.toml file couldn't be parsed. Either delete it and re-set-up from Settings, or open the file directly and fix the syntax.",
+    unknown: "Full error message is above. If nothing obvious jumps out, Settings → Show log will have context.",
+  };
+
+  async function retryConnection() {
+    try { await invoke("restart_watcher"); } catch {}
+  }
+  function goToSettings() { currentScreen.set("settings"); }
 
   // Where the map link opens: prefer the server's /replay/{user}/{id}
   // page, fall back to /u/{username} when we don't have the id.
@@ -179,6 +217,26 @@
       <div class="setup-body">
         Paste your uploader token and pick your osu! Replays folder.
         The watcher starts automatically as soon as you save.
+      </div>
+    </div>
+  {:else if s.state === "error"}
+    <div class="err-card err-kind-{errorKind}">
+      <div class="err-head">
+        <span class="err-icon">!</span>
+        <div class="err-titles">
+          <div class="err-title mono">{ERROR_TITLES[errorKind]}</div>
+          <div class="err-detail mono">{s.message}</div>
+        </div>
+      </div>
+      <div class="err-explain">{ERROR_EXPLAINS[errorKind]}</div>
+      <div class="err-actions">
+        {#if errorKind === "auth" || errorKind === "folder" || errorKind === "config"}
+          <button class="btn primary" onclick={goToSettings}>Fix in Settings</button>
+        {/if}
+        {#if errorKind === "network" || errorKind === "unknown"}
+          <button class="btn primary" onclick={retryConnection}>Retry now</button>
+        {/if}
+        <button class="btn" onclick={goToSettings}>Open Settings › Diagnostics</button>
       </div>
     </div>
   {/if}
@@ -499,6 +557,72 @@
     border: 1px solid var(--accent-soft);
     border-radius: 6px;
   }
+
+  /* Error card — shown on Home whenever state=error. Uses the same
+     accent-faint palette as setup-cta but with a stronger left border
+     to read as "action required" rather than "starter tip." */
+  .err-card {
+    margin-bottom: 20px;
+    padding: 16px 20px;
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+  }
+  .err-head { display: flex; align-items: flex-start; gap: 12px; }
+  .err-icon {
+    flex-shrink: 0;
+    width: 26px; height: 26px;
+    background: var(--accent); color: white;
+    border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-weight: 700; font-size: 14px;
+    line-height: 1;
+  }
+  .err-titles { flex: 1; min-width: 0; }
+  .err-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  .err-detail {
+    font-size: 11px;
+    color: var(--ink-muted);
+    margin-top: 4px;
+    word-break: break-word;
+  }
+  .err-explain {
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--ink);
+    line-height: 1.55;
+  }
+  .err-actions {
+    margin-top: 14px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--rule);
+    padding: 7px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .btn.primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .btn.primary:hover { background: color-mix(in oklab, black 10%, var(--accent)); }
+  .btn:hover { background: color-mix(in oklab, var(--ink) 6%, var(--panel)); }
   .setup-title {
     font-size: 12px;
     letter-spacing: 0.14em;
