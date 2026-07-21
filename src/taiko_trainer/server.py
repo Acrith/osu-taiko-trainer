@@ -604,6 +604,23 @@ def create_app(workspace: str) -> FastAPI:
             conn.close()
         return RedirectResponse(url=f"/admin?approved={md5}&touched={touched}", status_code=303)
 
+    @app.post("/admin/refresh")
+    def admin_refresh(session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME)):
+        """Re-parse every stored map blob against the current scoring model +
+        rejudge every stored replay + rebuild every player snapshot. Wire this
+        after any scoring.py / features.py / judgment.py change that changes
+        cached values; otherwise the site would keep showing pre-change
+        ratings until an entirely-new replay comes in on that map.
+
+        Blocking — no progress reporting — but at the current data volume
+        it runs in seconds. Grows to minutes with thousands of users; add a
+        background-task wrapper when it does."""
+        user, cat = _require_admin(session)
+        cat.close()
+        from .ingest import refresh_ratings
+        refresh_ratings(str(workspace))
+        return RedirectResponse(url="/admin?refreshed=1", status_code=303)
+
     @app.post("/admin/maps/{md5}/reject")
     def admin_reject_map(
         md5: str,
@@ -2784,6 +2801,13 @@ def _render_admin_queue(user, pending: list[dict]) -> str:
     <h1>Approval queue</h1>
     <p class="hint">Maps longer than 10 min land here first. Approving recomputes ratings and pushes them onto leaderboards; rejecting hard-deletes the map + all replays for it.</p>
   </section>
+  <section class="admin-tools">
+    <form method="post" action="/admin/refresh"
+          onsubmit="return confirm('Re-rate every stored map + rejudge every replay + rebuild every snapshot. Runs for a few seconds — the site will feel slow while it works. Continue?');">
+      <button class="tool-btn" type="submit">Refresh all ratings</button>
+    </form>
+    <span class="hint tool-hint">Use after any scoring / features / judgment change.</span>
+  </section>
   <section>
     <table class="admin-queue">
       <thead><tr><th>map</th><th>length</th><th>notes</th><th>BPM</th><th>OD</th><th>osu!</th><th></th></tr></thead>
@@ -2801,6 +2825,10 @@ def _render_admin_queue(user, pending: list[dict]) -> str:
     .admin-queue button.approve:hover {{ opacity: 0.85; }}
     .admin-queue button.reject:hover  {{ background: var(--miss); color: white; }}
     .admin-queue .muted {{ color: var(--ink-muted); font-size: 11px; }}
+    .admin-tools {{ display: flex; align-items: center; gap: 12px; margin: 24px 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; }}
+    .tool-btn {{ padding: 8px 16px; background: var(--accent); color: white; border: none; border-radius: 3px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; }}
+    .tool-btn:hover {{ opacity: 0.9; }}
+    .tool-hint {{ font-size: 12px; }}
   </style>
 """
     return _html_page(f"Admin queue ({len(pending)})", body, active="admin")
