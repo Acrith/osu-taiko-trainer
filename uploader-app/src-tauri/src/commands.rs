@@ -5,7 +5,7 @@
 use crate::config::{self, Config};
 use crate::http;
 use crate::state::{Record, State, Stats};
-use crate::worker::WorkerCmd;
+use crate::worker::{StatusPayload, StatusSlot, WorkerCmd};
 use std::sync::Arc;
 use tauri::State as TauriState;
 use tokio::sync::mpsc;
@@ -14,6 +14,10 @@ use tokio::sync::mpsc;
 pub struct AppState {
     pub state: Arc<State>,
     pub worker_tx: mpsc::Sender<WorkerCmd>,
+    /// The most recent status the worker emitted. Read via
+    /// `get_current_status` so the frontend doesn't have to race the
+    /// `status-changed` event.
+    pub status_slot: StatusSlot,
 }
 
 #[tauri::command]
@@ -45,6 +49,18 @@ pub fn default_server_url() -> &'static str {
 #[tauri::command]
 pub fn get_stats(app_state: TauriState<'_, AppState>) -> Result<Stats, String> {
     app_state.state.stats()
+}
+
+/// Return the last StatusPayload the worker emitted. Frontend calls this
+/// after registering its `status-changed` listener so it doesn't matter
+/// whether the worker emitted before or after the listener attached.
+#[tauri::command]
+pub fn get_current_status(app_state: TauriState<'_, AppState>) -> Result<StatusPayload, String> {
+    app_state
+        .status_slot
+        .lock()
+        .map(|s| s.clone())
+        .map_err(|e| format!("status slot poisoned: {}", e))
 }
 
 #[tauri::command]

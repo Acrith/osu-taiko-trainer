@@ -43,6 +43,15 @@
       }),
       listen("whoami-changed", ev => whoami.set(ev.payload)),
     ]);
+
+    // Pull the current status AFTER attaching the listener. If the worker
+    // emitted "watching" before we finished setting up (small race window
+    // during startup), the event was lost — but this invoke gets us the
+    // stored value, so the sidebar/Home never end up permanently stuck
+    // on "Starting" just because we lost the transition event.
+    const cur = await invoke("get_current_status").catch(() => null);
+    if (cur) status.set(cur);
+
     return () => unlisten.forEach(fn => fn());
   });
 

@@ -36,9 +36,20 @@ pub fn run() {
                 );
                 logging::log_line("setup: state DB opened, spawning worker");
 
-                let worker_tx = worker::spawn(app.handle().clone(), state.clone());
+                let status_slot = std::sync::Arc::new(std::sync::Mutex::new(
+                    worker::StatusPayload {
+                        state: "starting",
+                        message: "Starting…".to_string(),
+                        since: chrono::Utc::now().to_rfc3339(),
+                    },
+                ));
+                let worker_tx = worker::spawn(
+                    app.handle().clone(),
+                    state.clone(),
+                    status_slot.clone(),
+                );
 
-                app.manage(commands::AppState { state, worker_tx });
+                app.manage(commands::AppState { state, worker_tx, status_slot });
                 logging::log_line("setup: complete");
                 Ok(())
             })
@@ -48,6 +59,7 @@ pub fn run() {
                 commands::detect_replays_folder,
                 commands::default_server_url,
                 commands::get_stats,
+                commands::get_current_status,
                 commands::get_recent,
                 commands::fetch_whoami,
                 commands::backfill,

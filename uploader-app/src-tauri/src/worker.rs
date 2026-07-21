@@ -15,11 +15,17 @@ use crate::state::{self, State};
 use crate::watcher::watch_folder;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{interval, sleep};
+
+/// The most-recent StatusPayload the worker emitted. JS can query this
+/// via `get_current_status` after registering event listeners, so a
+/// status event that fired before the JS `listen()` completed isn't
+/// lost — the frontend just pulls the current value.
+pub type StatusSlot = Arc<Mutex<StatusPayload>>;
 
 /// Signals sent to the worker from the outside (commands invoked by JS).
 #[derive(Debug)]
@@ -60,7 +66,7 @@ pub struct ActivityRow {
 /// `tauri::async_runtime::spawn` wraps `tokio::spawn` but drives it on the
 /// runtime tauri already set up; calling `tokio::spawn` directly from the
 /// synchronous `setup` closure would panic (no current runtime).
-pub fn spawn(app: AppHandle, state: Arc<State>) -> mpsc::Sender<WorkerCmd> {
+pub fn spawn(app: AppHandle, state: Arc<State>, status_slot: StatusSlot) -> mpsc::Sender<WorkerCmd> {
     let (tx, rx) = mpsc::channel::<WorkerCmd>(16);
     tauri::async_runtime::spawn(async move {
         crate::logging::log_line("worker: task started");
@@ -68,15 +74,20 @@ pub fn spawn(app: AppHandle, state: Arc<State>) -> mpsc::Sender<WorkerCmd> {
         // writes to the log) — no wrapper needed here. Log the normal
         // exit so we can tell "the loop finished cleanly" from "the loop
         // never even started".
-        run(app, state, rx).await;
+        run(app, state, status_slot, rx).await;
         crate::logging::log_line("worker: run() returned");
     });
     tx
 }
 
-async fn run(app: AppHandle, state: Arc<State>, mut cmd_rx: mpsc::Receiver<WorkerCmd>) {
+async fn run(
+    app: AppHandle,
+    state: Arc<State>,
+    status_slot: StatusSlot,
+    mut cmd_rx: mpsc::Receiver<WorkerCmd>,
+) {
     crate::logging::log_line("worker::run: entered");
-    emit_status(&app, "starting", "Starting…");
+    emit_status(&app, &status_slot, "starting", "Starting…");
 
     loop {
         crate::logging::log_line("worker::run: loading config");
@@ -92,10 +103,10 @@ async fn run(app: AppHandle, state: Arc<State>, mut cmd_rx: mpsc::Receiver<Worke
                 crate::logging::log_line("worker::run: no config on disk");
                 emit_status(
                     &app,
+                    &status_slot,
                     "no_config",
                     "No config yet — open Settings to enter your token and replays folder.",
                 );
-                // Wait for a Reload signal (JS calls it after save_config).
                 if !wait_for_reload(&mut cmd_rx).await {
                     return;
                 }
@@ -103,7 +114,7 @@ async fn run(app: AppHandle, state: Arc<State>, mut cmd_rx: mpsc::Receiver<Worke
             }
             Err(e) => {
                 crate::logging::log_line(&format!("worker::run: config load error: {}", e));
-                emit_status(&app, "error", format!("Config error: {}", e));
+                emit_status(&app, &status_slot, "error", format!("Config error: {}", e));
                 if !wait_for_reload(&mut cmd_rx).await {
                     return;
                 }
@@ -111,7 +122,7 @@ async fn run(app: AppHandle, state: Arc<State>, mut cmd_rx: mpsc::Receiver<Worke
             }
         };
 
-        match run_with_config(app.clone(), state.clone(), cfg, &mut cmd_rx).await {
+        match run_with_config(app.clone(), state.clone(), &status_slot, cfg, &mut cmd_rx).await {
             NextAction::Reload => continue,
             NextAction::Backfill => {
                 // The backfill path also reloads config afterward — falls
@@ -132,13 +143,17 @@ enum NextAction {
 async fn run_with_config(
     app: AppHandle,
     state: Arc<State>,
+    status_slot: &StatusSlot,
     cfg: Config,
     cmd_rx: &mut mpsc::Receiver<WorkerCmd>,
 ) -> NextAction {
+    crate::logging::log_line("run_with_config: entered");
     let folder = PathBuf::from(&cfg.replays_folder);
     if !folder.is_dir() {
+        crate::logging::log_line(&format!("run_with_config: folder not a dir: {}", folder.display()));
         emit_status(
             &app,
+            status_slot,
             "error",
             format!("Replays folder not found: {}", folder.display()),
         );
@@ -147,38 +162,57 @@ async fn run_with_config(
             _ => NextAction::Reload,
         };
     }
+    crate::logging::log_line("run_with_config: folder ok, starting snapshot_historic");
 
     // Snapshot every existing .osr as SKIPPED_HISTORIC so the watcher only
     // touches genuinely-new plays. Matches Python's `cmd_run` guarantee.
-    snapshot_historic(&state, &folder);
+    // Delegated to a spawn_blocking so the sync SQLite I/O doesn't stall
+    // the async runtime — on a folder with thousands of .osr files this
+    // can take multiple seconds.
+    let state_for_snapshot = state.clone();
+    let folder_for_snapshot = folder.clone();
+    tokio::task::spawn_blocking(move || {
+        snapshot_historic(&state_for_snapshot, &folder_for_snapshot);
+    })
+    .await
+    .ok();
+    crate::logging::log_line("run_with_config: snapshot_historic done, starting watcher");
 
     let (watcher, mut file_rx) = match watch_folder(&folder) {
         Ok((w, rx)) => (w, rx),
         Err(e) => {
-            emit_status(&app, "error", format!("Watcher failed: {}", e));
+            crate::logging::log_line(&format!("run_with_config: watcher error: {}", e));
+            emit_status(&app, status_slot, "error", format!("Watcher failed: {}", e));
             return match wait_for_signal(cmd_rx).await {
                 Some(WorkerCmd::Shutdown) => NextAction::Shutdown,
                 _ => NextAction::Reload,
             };
         }
     };
+    crate::logging::log_line("run_with_config: watcher started, building HTTP client");
 
     let client = http::build_client();
+    crate::logging::log_line("run_with_config: emitting watching status");
     emit_status(
         &app,
+        status_slot,
         "watching",
         format!("Watching {}", folder.display()),
     );
 
     // Whoami — best-effort, fires the frontend event even on failure so
     // the sidebar shows "not signed in" vs. staying blank forever.
+    crate::logging::log_line("run_with_config: fetching whoami");
     let who = http::whoami(&client, &cfg).await;
+    crate::logging::log_line(&format!("run_with_config: whoami done: {}",
+        if who.is_some() { "some" } else { "none" }));
     let _ = app.emit("whoami-changed", &who);
 
     // Push initial stats + a snapshot of the most recent activity so the
     // UI has something to render immediately.
     push_stats(&app, &state);
     push_recent(&app, &state);
+    crate::logging::log_line("run_with_config: entering select! loop");
 
     // Fallback poll timer — catches missed OS events and covers cases
     // where notify doesn't fire (network shares, sleep/resume, etc.).
@@ -203,7 +237,7 @@ async fn run_with_config(
                     // For backfill we don't wipe SKIPPED_HISTORIC rows
                     // — instead we upload every .osr regardless of state.
                     // That's the "explicit historic import" behavior.
-                    run_backfill(&app, &state, &client, &cfg, &folder).await;
+                    run_backfill(&app, status_slot, &state, &client, &cfg, &folder).await;
                     // Fall through to keep watching.
                 }
             },
@@ -213,7 +247,7 @@ async fn run_with_config(
                 // window before we read the bytes.
                 sleep(Duration::from_millis(500)).await;
                 if !state.known(&file_name_of(&new_path)) {
-                    process_one(&app, &state, &client, &cfg, &new_path).await;
+                    process_one(&app, status_slot, &state, &client, &cfg, &new_path).await;
                 }
             }
 
@@ -225,7 +259,7 @@ async fn run_with_config(
                             .map(|s| s.eq_ignore_ascii_case("osr")).unwrap_or(false)
                             && !state.known(&file_name_of(&p))
                         {
-                            process_one(&app, &state, &client, &cfg, &p).await;
+                            process_one(&app, status_slot, &state, &client, &cfg, &p).await;
                         }
                     }
                 }
@@ -255,13 +289,14 @@ fn snapshot_historic(state: &State, folder: &Path) {
 
 async fn process_one(
     app: &AppHandle,
+    status_slot: &StatusSlot,
     state: &Arc<State>,
     client: &reqwest::Client,
     cfg: &Config,
     path: &Path,
 ) {
     let name = file_name_of(path);
-    emit_status(app, "uploading", format!("Uploading {}", name));
+    emit_status(app, status_slot, "uploading", format!("Uploading {}", name));
 
     let mut delay = Duration::from_secs(2);
     let max_delay = Duration::from_secs(60);
@@ -283,7 +318,7 @@ async fn process_one(
             emit_activity(app, &name, map_title.as_deref(), mods.as_deref(), accuracy, "uploaded");
             push_stats(app, state);
             push_recent(app, state);
-            emit_status(app, "watching", format!("Watching {}", cfg.replays_folder));
+            emit_status(app, status_slot, "watching", format!("Watching {}", cfg.replays_folder));
             return;
         }
 
@@ -294,12 +329,13 @@ async fn process_one(
                 emit_activity(app, &name, None, None, None, "skipped");
                 push_stats(app, state);
                 push_recent(app, state);
-                emit_status(app, "watching", format!("Watching {}", cfg.replays_folder));
+                emit_status(app, status_slot, "watching", format!("Watching {}", cfg.replays_folder));
                 return;
             }
             Some("unauth") => {
                 emit_status(
                     app,
+                    status_slot,
                     "error",
                     "Token unauthorized. Open Settings to re-enter your token.".to_string(),
                 );
@@ -312,13 +348,14 @@ async fn process_one(
         if !outcome.retryable {
             let err = outcome.error.unwrap_or_else(|| "unknown".to_string());
             emit_activity(app, &name, None, None, None, "failed");
-            emit_status(app, "error", format!("{}: {}", name, err));
+            emit_status(app, status_slot, "error", format!("{}: {}", name, err));
             return;
         }
 
         // Retry with exponential backoff, capped at 60s per attempt.
         emit_status(
             app,
+            status_slot,
             "uploading",
             format!("Retrying {} in {}s ({})", name, delay.as_secs(),
                     outcome.error.as_deref().unwrap_or("network error")),
@@ -330,12 +367,13 @@ async fn process_one(
 
 async fn run_backfill(
     app: &AppHandle,
+    status_slot: &StatusSlot,
     state: &Arc<State>,
     client: &reqwest::Client,
     cfg: &Config,
     folder: &Path,
 ) {
-    emit_status(app, "uploading", "Backfilling…".to_string());
+    emit_status(app, status_slot, "uploading", "Backfilling…".to_string());
     let Ok(entries) = std::fs::read_dir(folder) else { return; };
     let mut files: Vec<PathBuf> = entries
         .flatten()
@@ -356,9 +394,9 @@ async fn run_backfill(
         if state.uploaded(&name) {
             continue;
         }
-        process_one(app, state, client, cfg, &p).await;
+        process_one(app, status_slot, state, client, cfg, &p).await;
     }
-    emit_status(app, "watching", format!("Watching {}", cfg.replays_folder));
+    emit_status(app, status_slot, "watching", format!("Watching {}", cfg.replays_folder));
 }
 
 async fn wait_for_reload(rx: &mut mpsc::Receiver<WorkerCmd>) -> bool {
@@ -387,11 +425,20 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn emit_status(app: &AppHandle, s: &'static str, msg: impl Into<String>) {
-    let _ = app.emit(
-        "status-changed",
-        StatusPayload { state: s, message: msg.into(), since: now_iso() },
-    );
+fn emit_status(
+    app: &AppHandle,
+    slot: &StatusSlot,
+    s: &'static str,
+    msg: impl Into<String>,
+) {
+    let payload = StatusPayload { state: s, message: msg.into(), since: now_iso() };
+    // Store BEFORE emitting so a `get_current_status` command called
+    // concurrently sees the new value even if the event round-trip is
+    // still in flight.
+    if let Ok(mut w) = slot.lock() {
+        *w = payload.clone();
+    }
+    let _ = app.emit("status-changed", &payload);
 }
 
 fn emit_activity(
