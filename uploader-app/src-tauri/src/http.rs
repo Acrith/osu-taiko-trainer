@@ -118,9 +118,42 @@ pub struct Whoami {
     pub username: String,
     pub user_id: i64,
     pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub cover_url: Option<String>,
     pub country_code: Option<String>,
+    #[serde(default)]
+    pub global_rank: Option<i64>,
     pub style: Option<String>,
     pub server_url: Option<String>,
+}
+
+/// One replay the server has stored for the authenticated user. Used by
+/// the Replays screen to cross-reference "is this local .osr on the
+/// server?" via content_hash.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MyReplay {
+    pub id: i64,
+    #[serde(default)]
+    pub content_hash: Option<String>,
+    #[serde(default)]
+    pub map_md5: Option<String>,
+    #[serde(default)]
+    pub played_at: Option<String>,
+    #[serde(default)]
+    pub map_title: Option<String>,
+    #[serde(default)]
+    pub map_version: Option<String>,
+    #[serde(default)]
+    pub mods: Option<String>,
+    #[serde(default)]
+    pub accuracy: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct MyReplaysResp {
+    #[serde(default)]
+    username: Option<String>,
+    replays: Vec<MyReplay>,
 }
 
 /// The Home leaderboard-band payload — the user's current skill snapshot
@@ -171,6 +204,24 @@ pub async fn whoami(client: &Client, cfg: &Config) -> Option<Whoami> {
         who.server_url = Some(cfg.server_url.clone());
     }
     Some(who)
+}
+
+/// GET /api/v1/me/replays — the authenticated user's stored replays.
+/// Returns (username, list). username lets the frontend build /replay/
+/// links without a separate whoami round-trip.
+pub async fn my_replays(client: &Client, cfg: &Config) -> Option<(String, Vec<MyReplay>)> {
+    let resp = client
+        .get(format!("{}/api/v1/me/replays", cfg.server_url))
+        .header("Authorization", format!("Bearer {}", cfg.api_token))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: MyReplaysResp = resp.json().await.ok()?;
+    Some((body.username.unwrap_or_default(), body.replays))
 }
 
 /// GET /api/v1/me/skill — the authenticated user's skill snapshot + rank.

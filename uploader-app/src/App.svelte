@@ -9,7 +9,7 @@
   import About from "./lib/screens/About.svelte";
   import {
     currentScreen, status, whoami, config, recentActivity, stats,
-    defaultServerUrl, mySkill,
+    defaultServerUrl, mySkill, myReplays,
   } from "./lib/stores.js";
 
   let screen = $state("home");
@@ -31,6 +31,7 @@
     // Network-dependent fetches — fire in parallel, don't block startup.
     invoke("fetch_whoami").then(w => whoami.set(w)).catch(() => {});
     invoke("fetch_my_skill").then(s => mySkill.set(s)).catch(() => {});
+    invoke("fetch_my_replays").then(r => myReplays.set(r)).catch(() => {});
 
     const unlisten = await Promise.all([
       listen("status-changed", ev => status.set(ev.payload)),
@@ -48,20 +49,22 @@
     const cur = await invoke("get_current_status").catch(() => null);
     if (cur) status.set(cur);
 
-    // Refresh skill data whenever a new upload completes — the server
-    // recomputes the snapshot after each replay lands, so the Home
-    // leaderboard band should reflect it within a couple seconds.
-    let skillRefreshQueued = null;
-    const unlistenSkill = await listen("activity-added", () => {
-      clearTimeout(skillRefreshQueued);
-      skillRefreshQueued = setTimeout(() => {
+    // Refresh skill + replays list whenever a new upload completes —
+    // the server recomputes the snapshot after each replay lands, so
+    // the Home band + Replays classification should reflect it within
+    // a couple seconds.
+    let serverRefreshQueued = null;
+    const unlistenServer = await listen("activity-added", () => {
+      clearTimeout(serverRefreshQueued);
+      serverRefreshQueued = setTimeout(() => {
         invoke("fetch_my_skill").then(s => mySkill.set(s)).catch(() => {});
+        invoke("fetch_my_replays").then(r => myReplays.set(r)).catch(() => {});
       }, 1500);
     });
 
     return () => {
-      clearTimeout(skillRefreshQueued);
-      unlistenSkill();
+      clearTimeout(serverRefreshQueued);
+      unlistenServer();
       unlisten.forEach(fn => fn());
     };
   });

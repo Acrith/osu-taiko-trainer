@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -30,6 +31,7 @@ from . import auth as auth_module
 from . import db as db_module
 from .db import (
     browse_maps,
+    catalog_path,
     create_api_token,
     delete_user_completely,
     discover_players,
@@ -1087,8 +1089,9 @@ def create_app(workspace: str) -> FastAPI:
         # Resolve style from the per-player DB; missing / "unknown" → None.
         style: str | None = None
         try:
+            from .db import player_db_path
             player_name = user["osu_username"]
-            player_db = workspace / "players" / f"{player_name}.db"
+            player_db = player_db_path(workspace, player_name)
             if player_db.exists():
                 with sqlite3.connect(str(player_db)) as conn:
                     conn.row_factory = sqlite3.Row
@@ -1103,10 +1106,87 @@ def create_app(workspace: str) -> FastAPI:
             "user_id":       user["osu_user_id"],
             "username":      user["osu_username"],
             "avatar_url":    user["osu_avatar_url"],
+            "cover_url":     user["osu_cover_url"],
             "country_code":  user["osu_country_code"],
             "global_rank":   user["osu_global_rank"],
             "style":         style,
         })
+
+    @app.get("/api/v1/me/replays")
+    def api_uploader_my_replays(authorization: str | None = Header(default=None)):
+        """Return the authenticated user's stored replays as a compact list
+        the uploader's Replays screen can cross-reference against local
+        files. Each row: id, map_md5, played_at, map_title, map_version,
+        mods, accuracy, content_hash.
+
+        content_hash is sha256(first 512 bytes of .osr content) — same
+        fingerprint the uploader computes locally. For pre-migration rows
+        where the column is NULL, we compute + persist here so subsequent
+        calls skip the work (self-healing back-fill)."""
+        import hashlib
+        raw_token = auth_module.parse_bearer_header(authorization)
+        if not raw_token:
+            raise HTTPException(status_code=401, detail="missing or malformed Authorization header")
+        cat = open_catalog(workspace)
+        user_id = verify_api_token(cat, raw_token)
+        if user_id is None:
+            cat.close()
+            raise HTTPException(status_code=401, detail="token unknown or revoked")
+        user = get_user_by_id(cat, user_id)
+        cat.close()
+        if not user:
+            raise HTTPException(status_code=404, detail="user record missing")
+
+        from .db import player_db_path
+        player_name = user["osu_username"]
+        p = player_db_path(workspace, player_name)
+        if not p.exists():
+            return JSONResponse({"replays": []})
+
+        rows: list[dict] = []
+        try:
+            with sqlite3.connect(str(p)) as conn:
+                conn.row_factory = sqlite3.Row
+                # Join with catalog.maps for map_title / map_version so the
+                # uploader can show a friendly label per replay row.
+                catalog = catalog_path(workspace)
+                conn.execute(f"ATTACH DATABASE '{catalog}' AS cat")
+                cursor = conn.execute(
+                    """
+                    SELECT r.id, r.map_md5, r.played_at, r.mods_label AS mods,
+                           r.accuracy_judged AS accuracy, r.content_hash,
+                           r.content, m.title AS map_title, m.version AS map_version
+                    FROM replays r LEFT JOIN cat.maps m ON m.md5 = r.map_md5
+                    ORDER BY r.played_at DESC
+                    """
+                )
+                to_backfill: list[tuple[str, int]] = []
+                for r in cursor.fetchall():
+                    d = dict(r)
+                    h = d.get("content_hash")
+                    if not h and d.get("content"):
+                        h = hashlib.sha256(d["content"][:512]).hexdigest()
+                        to_backfill.append((h, d["id"]))
+                    rows.append({
+                        "id":            d["id"],
+                        "map_md5":       d["map_md5"],
+                        "played_at":     d["played_at"],
+                        "map_title":     d.get("map_title"),
+                        "map_version":   d.get("map_version"),
+                        "mods":          d.get("mods"),
+                        "accuracy":      d.get("accuracy"),
+                        "content_hash":  h,
+                    })
+                if to_backfill:
+                    conn.executemany(
+                        "UPDATE replays SET content_hash = ? WHERE id = ?",
+                        to_backfill,
+                    )
+                    conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+        return JSONResponse({"username": player_name, "replays": rows})
 
     @app.get("/api/v1/me/skill")
     def api_uploader_my_skill(authorization: str | None = Header(default=None)):

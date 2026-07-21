@@ -1,8 +1,10 @@
-//! Folder scanning for the Import screen — walks the replays folder,
+//! Folder scanning for the Replays screen — walks the replays folder,
 //! joins each .osr entry with the state DB, and returns a flat list the
-//! frontend can filter + select from.
+//! frontend can filter + select from. Also computes each file's
+//! content_hash so the frontend can cross-reference with the server's
+//! `/api/v1/me/replays` list.
 
-use crate::state::State;
+use crate::state::{hash_head, State};
 use serde::Serialize;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
@@ -14,16 +16,23 @@ pub struct FolderEntry {
     /// that don't report mtime for the entry (rare) — treat as unknown.
     pub modified_at: Option<String>,
     pub size_bytes: u64,
-    /// Classification against the state DB:
+    /// Classification against the LOCAL state DB alone:
     ///   "never_seen" — not in state DB at all
     ///   "historic"   — was here at first `run` and marked SKIPPED_HISTORIC
     ///   "uploaded"   — successfully sent, server assigned a replay_id
     ///   "skipped"    — server said duplicate / foreign / other terminal skip
+    /// The frontend refines this with server data — a "historic" row can
+    /// upgrade to "uploaded" if its content_hash matches something on
+    /// the server's list.
     pub state: &'static str,
     pub replay_id: Option<i64>,
     pub map_title: Option<String>,
     pub mods: Option<String>,
     pub accuracy: Option<f64>,
+    /// sha256 of the first 512 bytes — the fingerprint we cross-reference
+    /// with `/api/v1/me/replays` server-side. None on read errors (which
+    /// shouldn't happen for a file we just found via read_dir).
+    pub content_hash: Option<String>,
 }
 
 /// Enumerate all `.osr` files in `folder` and classify each against the
@@ -77,6 +86,11 @@ pub fn scan(state: &State, folder: &Path) -> Vec<FolderEntry> {
             }
         };
 
+        // Cheap fingerprint of the first 512 bytes. Only ~1ms per file
+        // and lets the frontend definitively say "this .osr is on the
+        // server" without re-uploading + eating a 409.
+        let content_hash = hash_head(&path).ok();
+
         out.push(FolderEntry {
             filename: name,
             modified_at,
@@ -86,6 +100,7 @@ pub fn scan(state: &State, folder: &Path) -> Vec<FolderEntry> {
             map_title,
             mods,
             accuracy,
+            content_hash,
         });
     }
 

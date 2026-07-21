@@ -1,16 +1,35 @@
 <script>
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { listen } from "@tauri-apps/api/event";
+  import { config, myReplays } from "../stores.js";
 
   let entries = $state([]);
   let loading = $state(false);
   let error = $state(null);
 
   let search = $state("");
-  let stateFilter = $state("not_uploaded"); // "all" | "never_seen" | "historic" | "uploaded" | "skipped" | "not_uploaded"
+  let stateFilter = $state("not_uploaded");
   let selection = $state(new Set());
   let uploading = $state(false);
+
+  let cfg = $state(null);
+  config.subscribe(v => (cfg = v));
+
+  let serverReplays = $state(null);
+  myReplays.subscribe(v => (serverReplays = v));
+
+  // content_hash → server replay row. When we scan a local file, we look
+  // it up here — if it exists, the file is definitively on the server
+  // regardless of what the local state DB thinks.
+  const serverByHash = $derived.by(() => {
+    const m = new Map();
+    for (const r of (serverReplays?.replays ?? [])) {
+      if (r.content_hash) m.set(r.content_hash, r);
+    }
+    return m;
+  });
 
   const STATE_LABELS = {
     never_seen: "New",
@@ -19,19 +38,43 @@
     skipped:    "Skipped",
   };
 
+  // Merge server + local classifications into the final state we display.
+  // A file that's on the server is always shown as "uploaded", even if
+  // the local state DB thinks it's SKIPPED_HISTORIC.
+  function classify(entry) {
+    if (entry.content_hash && serverByHash.has(entry.content_hash)) {
+      return "uploaded";
+    }
+    return entry.state;
+  }
+  function serverMatch(entry) {
+    if (!entry.content_hash) return null;
+    return serverByHash.get(entry.content_hash) ?? null;
+  }
+
   const filtered = $derived.by(() => {
     const q = search.trim().toLowerCase();
-    return entries.filter(e => {
-      // Status filter — "not_uploaded" is a compound of everything except
-      // the "uploaded" state; matches what most users mean by "stuff still
-      // to import".
+    return entries.map(e => {
+      const cls = classify(e);
+      const sm = serverMatch(e);
+      return {
+        ...e,
+        display_state: cls,
+        // Prefer server-side map data when we have a match, so the Map
+        // column populates even for locally-historic rows.
+        display_title: sm?.map_title ?? e.map_title,
+        display_mods:  sm?.mods ?? e.mods,
+        display_acc:   sm?.accuracy ?? e.accuracy,
+        replay_id:     sm?.id ?? e.replay_id,
+      };
+    }).filter(e => {
       if (stateFilter === "not_uploaded") {
-        if (e.state === "uploaded") return false;
-      } else if (stateFilter !== "all" && e.state !== stateFilter) {
+        if (e.display_state === "uploaded") return false;
+      } else if (stateFilter !== "all" && e.display_state !== stateFilter) {
         return false;
       }
       if (!q) return true;
-      const hay = `${e.filename} ${e.map_title ?? ""}`.toLowerCase();
+      const hay = `${e.filename} ${e.display_title ?? ""}`.toLowerCase();
       return hay.includes(q);
     });
   });
@@ -48,9 +91,11 @@
     error = null;
     try {
       entries = await invoke("list_folder_entries");
-      // Purge selections for files that vanished from the folder.
       const alive = new Set(entries.map(e => e.filename));
       selection = new Set([...selection].filter(f => alive.has(f)));
+      // Also refresh the server-side list — the user might have uploaded
+      // through the web UI in another tab.
+      invoke("fetch_my_replays").then(r => myReplays.set(r)).catch(() => {});
     } catch (e) {
       error = String(e);
     } finally {
@@ -60,9 +105,8 @@
 
   onMount(async () => {
     await refresh();
-    // When the worker finishes uploading a file, the row's state changes —
-    // refresh so the UI reflects reality without the user hitting Refresh.
-    // Debounced so a burst of 10 completions triggers one rescan.
+    // Debounce refreshes triggered by upload completions so we don't
+    // rescan the folder 10 times during a big backfill run.
     let pending = null;
     const unlisten = await listen("activity-added", () => {
       clearTimeout(pending);
@@ -72,14 +116,10 @@
   });
 
   function toggle(name) {
-    // Set operations in Svelte 5 aren't reactive on mutation — reassign
-    // to trigger tracking. Same pattern as Map/WeakMap in runes mode.
     const next = new Set(selection);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
+    if (next.has(name)) next.delete(name); else next.add(name);
     selection = next;
   }
-
   function toggleAllVisible() {
     const next = new Set(selection);
     if (allFilteredSelected) {
@@ -89,7 +129,6 @@
     }
     selection = next;
   }
-
   async function uploadSelected() {
     if (selection.size === 0 || uploading) return;
     uploading = true;
@@ -97,20 +136,14 @@
     try {
       const filenames = [...selection];
       await invoke("upload_files", { filenames });
-      // Don't clear the selection immediately — the user can see what's
-      // still pending as rows flip to "uploaded". They can clear it via
-      // "Select none" once satisfied.
     } catch (e) {
       error = String(e);
     } finally {
       uploading = false;
     }
   }
-
   function clearSelection() { selection = new Set(); }
 
-  // Compact relative time formatter — "2m", "3h", "5d", etc. Full ISO
-  // stays in the row's title attribute for hover disclosure.
   function relTime(iso) {
     if (!iso) return "—";
     const t = new Date(iso).getTime();
@@ -122,11 +155,19 @@
     if (secs < 30 * 86400) return `${Math.round(secs / 86400)}d`;
     return new Date(iso).toISOString().slice(0, 10);
   }
-
   function fmtSize(n) {
     if (n < 1024) return `${n}B`;
     if (n < 1024 * 1024) return `${Math.round(n / 1024)}KB`;
     return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+  }
+
+  function replayUrl(row) {
+    if (!row.replay_id || !cfg?.server_url || !serverReplays?.username) return null;
+    return `${cfg.server_url}/replay/${serverReplays.username}/${row.replay_id}`;
+  }
+  function openReplay(row) {
+    const u = replayUrl(row);
+    if (u) openUrl(u);
   }
 </script>
 
@@ -223,18 +264,27 @@
                 onchange={() => toggle(e.filename)}
               />
             </td>
-            <td class="mono filename" title={e.filename}>{e.filename}</td>
-            <td class="mono muted" title={e.modified_at ?? ""}>{relTime(e.modified_at)}</td>
+            <td class="mono filename">{e.filename}</td>
+            <td class="mono muted">{relTime(e.modified_at)}</td>
             <td class="mono muted">{fmtSize(e.size_bytes)}</td>
             <td>
-              <span class="pill pill-{e.state}">{STATE_LABELS[e.state] ?? e.state}</span>
+              <span class="pill pill-{e.display_state}">{STATE_LABELS[e.display_state] ?? e.display_state}</span>
             </td>
             <td class="map">
-              {#if e.map_title && e.map_title !== "SKIPPED_HISTORIC"}
-                <span class="map-title">{e.map_title}</span>
-                {#if e.mods && e.mods !== "NM"}<span class="mods mono">+{e.mods}</span>{/if}
-                {#if typeof e.accuracy === "number"}
-                  <span class="acc mono">{(e.accuracy * 100).toFixed(2)}%</span>
+              {#if e.display_title && e.display_title !== "SKIPPED_HISTORIC"}
+                {#if replayUrl(e)}
+                  <button class="map-link mono" onclick={() => openReplay(e)}>
+                    <span class="map-title">{e.display_title}</span>
+                    <span class="link-hint mono">↗</span>
+                  </button>
+                {:else}
+                  <span class="map-title">{e.display_title}</span>
+                {/if}
+                {#if e.display_mods && e.display_mods !== "NM"}
+                  <span class="mods mono">+{e.display_mods}</span>
+                {/if}
+                {#if typeof e.display_acc === "number"}
+                  <span class="acc mono">{(e.display_acc * 100).toFixed(2)}%</span>
                 {/if}
               {:else}
                 <span class="muted">—</span>
@@ -403,6 +453,20 @@
 
   .map { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .map-title { color: var(--ink); }
+  .map-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+  }
+  .map-link:hover .map-title { color: var(--accent); }
+  .map-link:hover .link-hint { color: var(--accent); }
+  .link-hint { color: var(--ink-faint); font-size: 10px; }
   .mods { color: var(--accent); font-size: 11px; }
   .acc { color: var(--ink-muted); font-size: 11px; }
 

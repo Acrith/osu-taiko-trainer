@@ -98,6 +98,27 @@ pub async fn fetch_my_skill() -> Result<Option<http::MySkill>, String> {
     Ok(http::my_skill(&client, &cfg).await)
 }
 
+/// Fetch the server's list of stored replays for this user. The Replays
+/// screen uses `content_hash` to cross-reference "is this local .osr on
+/// the server already?" so HISTORIC files that were uploaded elsewhere
+/// classify as UPLOADED instead of just "we haven't sent them yet".
+#[derive(serde::Serialize)]
+pub struct MyReplaysPayload {
+    pub username: String,
+    pub replays: Vec<http::MyReplay>,
+}
+
+#[tauri::command]
+pub async fn fetch_my_replays() -> Result<Option<MyReplaysPayload>, String> {
+    let cfg = match config::load()? {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let client = http::build_client();
+    Ok(http::my_replays(&client, &cfg).await
+        .map(|(username, replays)| MyReplaysPayload { username, replays }))
+}
+
 /// Kick off a one-shot backfill of every `.osr` in the folder that hasn't
 /// already been uploaded. Explicit user action — never fires by itself.
 #[tauri::command]

@@ -64,6 +64,7 @@ pub fn run() {
                 commands::get_recent,
                 commands::fetch_whoami,
                 commands::fetch_my_skill,
+                commands::fetch_my_replays,
                 commands::backfill,
                 commands::list_folder_entries,
                 commands::upload_files,

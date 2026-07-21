@@ -201,7 +201,7 @@ async fn run_with_config(
         &app,
         status_slot,
         "watching",
-        format!("Watching {}", folder.display()),
+        folder.display().to_string(),
     );
 
     // Whoami — best-effort, fires the frontend event even on failure so
@@ -252,7 +252,7 @@ async fn run_with_config(
                         process_one(&app, status_slot, &state, &client, &cfg, &p).await;
                     }
                     emit_status(&app, status_slot, "watching",
-                        format!("Watching {}", cfg.replays_folder));
+                        cfg.replays_folder.clone());
                 }
             },
 
@@ -332,7 +332,7 @@ async fn process_one(
             emit_activity(app, &name, map_title.as_deref(), mods.as_deref(), accuracy, "uploaded");
             push_stats(app, state);
             push_recent(app, state);
-            emit_status(app, status_slot, "watching", format!("Watching {}", cfg.replays_folder));
+            emit_status(app, status_slot, "watching", cfg.replays_folder.clone());
             return;
         }
 
@@ -343,7 +343,7 @@ async fn process_one(
                 emit_activity(app, &name, None, None, None, "skipped");
                 push_stats(app, state);
                 push_recent(app, state);
-                emit_status(app, status_slot, "watching", format!("Watching {}", cfg.replays_folder));
+                emit_status(app, status_slot, "watching", cfg.replays_folder.clone());
                 return;
             }
             Some("unauth") => {
@@ -410,7 +410,7 @@ async fn run_backfill(
         }
         process_one(app, status_slot, state, client, cfg, &p).await;
     }
-    emit_status(app, status_slot, "watching", format!("Watching {}", cfg.replays_folder));
+    emit_status(app, status_slot, "watching", cfg.replays_folder.clone());
 }
 
 async fn wait_for_reload(rx: &mut mpsc::Receiver<WorkerCmd>) -> bool {

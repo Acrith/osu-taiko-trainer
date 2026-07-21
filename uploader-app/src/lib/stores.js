@@ -27,6 +27,12 @@ export const whoami = writable(null);
 // { has_data: false } when the user has no rateable plays yet.
 export const mySkill = writable(null);
 
+// GET /api/v1/me/replays — the server's list of stored replays for this
+// user. The Replays screen cross-references content_hash with the local
+// folder scan so HISTORIC files that were uploaded elsewhere classify
+// as UPLOADED. Shape: { username, replays: [ {id, content_hash, ...} ] }.
+export const myReplays = writable(null);
+
 // The Config the daemon is running with. Editable from Settings.
 export const config = writable(null);
 

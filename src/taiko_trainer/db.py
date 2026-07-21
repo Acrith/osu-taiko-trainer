@@ -321,6 +321,12 @@ def _migrate_plays_schema(conn: sqlite3.Connection) -> None:
         ("rating_consistency_eff", "ALTER TABLE replays ADD COLUMN rating_consistency_eff REAL"),
         ("rating_reading_eff",     "ALTER TABLE replays ADD COLUMN rating_reading_eff REAL"),
         ("is_lazer",               "ALTER TABLE replays ADD COLUMN is_lazer INTEGER DEFAULT 0"),
+        # sha256(first 512 bytes of .osr content) — same fingerprint the
+        # uploader binary uses locally. Lets the uploader's Replays screen
+        # cross-reference "is this file on the server already?" without
+        # re-parsing the .osr on either side. NULL for pre-migration rows;
+        # /api/v1/me/replays lazily fills them in when it reads them.
+        ("content_hash",           "ALTER TABLE replays ADD COLUMN content_hash TEXT"),
     ):
         if col not in replays_existing:
             conn.execute(ddl)
@@ -1453,6 +1459,12 @@ def insert_replay(
         stored_ok = judged.count_ok
         stored_miss = judged.count_miss
 
+    # sha256(first 512 bytes) — same fingerprint the uploader binary uses
+    # to dedup files locally. Storing it here lets the uploader's Replays
+    # screen cross-reference "is this local .osr on the server?" in O(1).
+    import hashlib as _hashlib
+    content_hash = _hashlib.sha256(replay_content[:512]).hexdigest()
+
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO replays (
@@ -1468,8 +1480,9 @@ def insert_replay(
             rating_gimmick_eff, rating_technical_eff, rating_consistency_eff,
             rating_reading_eff,
             is_lazer,
+            content_hash,
             inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             map_md5, replay_content,
@@ -1489,6 +1502,7 @@ def insert_replay(
             er.consistency if er else None,
             er.reading if er else None,
             1 if is_lazer else 0,
+            content_hash,
             _now(),
         ),
     )
