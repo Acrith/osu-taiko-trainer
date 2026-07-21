@@ -1,6 +1,6 @@
 [package]
 name = "taiko-uploader"
-version = "0.2.2"
+version = "0.2.3"
 description = "osu!taiko trainer uploader companion"
 authors = ["Acrith"]
 edition = "2021"
