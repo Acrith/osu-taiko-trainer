@@ -717,6 +717,17 @@ def _cached(key: tuple, fn):
     return val
 
 
+def invalidate_leaderboard_cache() -> None:
+    """Wipe the leaderboard TTL cache. Called after any ingest that
+    changes a snapshot value — otherwise `top_users_by_skill` (with any
+    limit) can serve stale data for up to a minute, which the uploader
+    surfaces as "gain toast delta is wrong" and "my Home band's total
+    doesn't match my /u/ page." Cheap for the size of the dict we have
+    at real usage; punt to a more targeted invalidation if it ever
+    stops being cheap."""
+    _LEADERBOARD_CACHE.clear()
+
+
 def top_users_by_skill(
     workspace: str | Path,
     dim: str,

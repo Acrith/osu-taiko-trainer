@@ -495,6 +495,17 @@ def add_replay(
         latest_replay_played_at=rp.meta.timestamp.isoformat(),
     )
     plays.close()
+
+    # Invalidate the leaderboard cache so /api/v1/me/skill,
+    # /leaderboards, and every downstream lookup that goes through
+    # top_users_by_skill(...) sees the new snapshot immediately. Without
+    # this, the uploader's Home band + gain toast can lag by up to 60s
+    # (the cache TTL) — and during a bursty upload session that means
+    # every gain popup after the first is computed against a stale
+    # baseline. See db._cached / invalidate_leaderboard_cache.
+    from .db import invalidate_leaderboard_cache
+    invalidate_leaderboard_cache()
+
     _report("done", note=f"replay #{replay_id} added")
 
     return AddResult(

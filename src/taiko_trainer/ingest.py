@@ -203,6 +203,11 @@ def refresh_ratings(workspace: str) -> None:
         conn.close()
         print(f"  {player}: {rejudged}/{len(replays)} replays rejudged  ·  {count} session snapshot(s) rebuilt")
 
+    # Same reason as add_replay: every snapshot in the workspace just
+    # moved, so anything the leaderboard cache remembers is stale.
+    from .db import invalidate_leaderboard_cache
+    invalidate_leaderboard_cache()
+
 
 def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "refresh":
