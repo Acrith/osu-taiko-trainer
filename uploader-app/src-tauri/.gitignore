@@ -1,0 +1,4 @@
+# Cargo build output
+target/
+# Tauri generates a schema tree under this path on first build
+gen/schemas

@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-ssr
+*.local
+
+# Vite
+.vite
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# System
+.DS_Store
+Thumbs.db

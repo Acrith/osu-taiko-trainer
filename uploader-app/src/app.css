@@ -1,0 +1,80 @@
+/*
+ * Design tokens — mirrored from src/taiko_trainer/server.py's _BASE_CSS so the
+ * uploader and the website share one visual language. When the site's tokens
+ * change, mirror them here too.
+ */
+:root {
+  --ground: #F4EFE6;
+  --panel: #FBF7EE;
+  --ink: #141416;
+  --ink-muted: #5A554C;
+  --ink-faint: #8B8676;
+  --rule: #DED5C4;
+  --rule-strong: #C7BDA8;
+  --accent: #B0322B;
+  --accent-soft: #E1AAA5;
+  --accent-faint: #F1D9D5;
+  --accent-cool: #4B6A83;
+  --great: #4A7752;
+  --ok: #B08A2B;
+  --miss: #B0322B;
+  --font-sans: system-ui, -apple-system, "Segoe UI Variable", "Segoe UI",
+               Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo",
+               "Fira Code", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0F1114;
+    --panel: #16181D;
+    --ink: #EFE9DE;
+    --ink-muted: #A8A192;
+    --ink-faint: #6E6A5F;
+    --rule: #23262C;
+    --rule-strong: #2F323A;
+    --accent: #E85A4F;
+    --accent-soft: #78302C;
+    --accent-faint: #3E1E1B;
+    --accent-cool: #78A3C5;
+    --great: #7DB68B;
+    --ok: #D6B04F;
+    --miss: #E85A4F;
+  }
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+#app { height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--panel);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--ink);
+}
+
+/* Utility classes used across screens */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
