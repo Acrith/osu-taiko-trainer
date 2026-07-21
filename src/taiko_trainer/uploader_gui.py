@@ -46,6 +46,23 @@ from .uploader import (
 APP_NAME = "taiko-trainer uploader"
 
 
+def _log_path() -> Path:
+    """~/.taiko-trainer/uploader.log — sibling of the config + state DB."""
+    return _config_path().parent / "uploader.log"
+
+
+def _write_log(msg: str) -> None:
+    """Append a timestamped line to the debug log. Non-fatal — if writing
+    fails we swallow so the watcher can keep running."""
+    try:
+        p = _log_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
 # --- Icon (generated in-code; no image file to ship) -----------------------
 
 def _make_icon(size: int = 64, tint: str = "#e86428") -> Image.Image:
@@ -163,7 +180,7 @@ class UploaderThread(threading.Thread):
     def __init__(self, cfg: Config):
         super().__init__(daemon=True, name="uploader-watch")
         self.cfg = cfg
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._paused = threading.Event()
         self.uploads_today = 0
         self.last_upload: str | None = None
@@ -179,18 +196,39 @@ class UploaderThread(threading.Thread):
         self.status_msg = "Watching"
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def is_paused(self) -> bool:
         return self._paused.is_set()
 
     def run(self) -> None:
+        import traceback
+        try:
+            self._run_inner()
+        except Exception as e:
+            # Anything reaching here means the watcher thread died. Surface
+            # the error to the tray + append to the debug log so the user
+            # has something to click.
+            self.status_msg = f"Error: {e}"
+            _write_log(f"UploaderThread died: {e!r}\n{traceback.format_exc()}")
+
+    def _run_inner(self) -> None:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
 
         # Open State inside this thread so its sqlite3 connection lives here.
         # Cross-thread use raises sqlite3.ProgrammingError by default.
         self.state = State(_state_path())
+
+        # Guard against a missing / mistyped folder — Observer.schedule
+        # raises a cryptic OSError otherwise, and without this check the
+        # thread dies before status_msg updates from "Starting…".
+        folder = Path(self.cfg.replays_folder)
+        if not folder.is_dir():
+            msg = f"Replays folder not found: {self.cfg.replays_folder}"
+            self.status_msg = msg
+            _write_log(msg + " — edit uploader.toml and restart, or delete it to re-run the setup dialog.")
+            return
 
         q: "queue.Queue[Path]" = queue.Queue()
 
@@ -211,20 +249,19 @@ class UploaderThread(threading.Thread):
                     self._enqueue(ev.dest_path)
 
         # Snapshot existing files so we don't re-upload history on first launch.
-        folder = Path(self.cfg.replays_folder)
-        if folder.is_dir():
-            for p in folder.glob("*.osr"):
-                if not self.state.known(p.name):
-                    self.state.record(p.name, "", None, {"map_title": "SKIPPED_HISTORIC"})
+        for p in folder.glob("*.osr"):
+            if not self.state.known(p.name):
+                self.state.record(p.name, "", None, {"map_title": "SKIPPED_HISTORIC"})
 
         obs = Observer()
         obs.schedule(_Handler(), self.cfg.replays_folder, recursive=False)
         obs.start()
         self.status_msg = "Watching for new plays"
+        _write_log(f"Watching {self.cfg.replays_folder} · server {self.cfg.server_url}")
 
         try:
             with httpx.Client() as client:
-                while not self._stop.is_set():
+                while not self._stop_event.is_set():
                     if self._paused.is_set():
                         time.sleep(0.5)
                         continue
@@ -234,12 +271,15 @@ class UploaderThread(threading.Thread):
                         continue
                     if self.state.known(path.name):
                         continue
-                    _process_one(client, self.cfg, self.state, path)
-                    # Very light per-day counter (resets on restart — good
-                    # enough for the tray tooltip; state DB has the real
-                    # history if we ever want a permanent count).
-                    self.uploads_today += 1
-                    self.last_upload = path.name
+                    try:
+                        _process_one(client, self.cfg, self.state, path)
+                        self.uploads_today += 1
+                        self.last_upload = path.name
+                    except Exception as e:
+                        # Individual upload failures shouldn't kill the whole
+                        # watcher — log and keep watching.
+                        import traceback as _tb
+                        _write_log(f"Upload failed for {path.name}: {e!r}\n{_tb.format_exc()}")
         finally:
             obs.stop()
             obs.join()
@@ -269,6 +309,22 @@ def _build_menu(uploader: UploaderThread, cfg: Config, quit_fn) -> pystray.Menu:
         except Exception:
             subprocess.Popen(["explorer", str(cfg_dir)])
 
+    def _open_log(icon, item):
+        import os
+        import subprocess
+        log_p = _log_path()
+        # Ensure the file exists so notepad doesn't 404
+        if not log_p.exists():
+            _write_log("(log opened — no prior entries)")
+        try:
+            os.startfile(str(log_p))
+        except Exception:
+            try:
+                subprocess.Popen(["notepad", str(log_p)])
+            except Exception:
+                # Fall back to Explorer at the containing dir
+                subprocess.Popen(["explorer", str(log_p.parent)])
+
     def _toggle_pause(icon, item):
         if uploader.is_paused():
             uploader.resume()
@@ -293,6 +349,7 @@ def _build_menu(uploader: UploaderThread, cfg: Config, quit_fn) -> pystray.Menu:
         pystray.MenuItem("Open dashboard", _open_dashboard),
         pystray.MenuItem("Settings (browser)", _open_settings),
         pystray.MenuItem("Open config folder", _open_config_folder),
+        pystray.MenuItem("Open log file", _open_log),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", quit_fn),
     )
