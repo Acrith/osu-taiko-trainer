@@ -3,7 +3,11 @@
   import { cubicOut } from "svelte/easing";
   import { lastGain } from "./stores.js";
 
-  const HOLD_MS = 9000;
+  // A full minute. Long enough to actually read, and the toast is
+  // already replaced when a new upload lands, so a Backfill run won't
+  // leave 48 stacked minute-long popups — each new gain resets the
+  // timer and overwrites the visible content.
+  const HOLD_MS = 60_000;
 
   let gain = $state(null);
   let dismissTimer = null;
