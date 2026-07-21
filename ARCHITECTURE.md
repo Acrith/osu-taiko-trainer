@@ -1,236 +1,230 @@
-# taiko-trainer — hosted web service architecture
+# taiko-trainer architecture
 
-Living design doc for the web build. Iterating in-place; if a decision here
-turns out wrong under real usage, update the doc rather than let the code
-drift silently.
+How the hosted service actually works today. If you're changing the code,
+this is the map. When a decision here turns out wrong under real usage,
+update the doc rather than let the code silently drift.
 
-## What we're building
+## What it is
 
-A hosted training analytics service for osu!taiko players. Same skill-vector
-+ diagnostic engine that already exists, exposed as a shared web service so:
+A hosted training analytics service for osu!taiko players. Uploaded
+`.osr` files get parsed against their `.osu` map, judged for
+timing/miss/verdict per note, and folded into a six-dimensional skill
+snapshot the user can compare against theirs from last week or against
+the leaderboard.
 
-- Players don't install anything to view their reports
-- Uploaded maps and skill data compound into a shared catalog
-- Players can inspect each other's profiles (like osu! itself)
-- The scoring model can be iterated centrally against real play data
-
-A thin native uploader companion watches the user's `Data/r/` folder locally
-and auto-uploads new replays as they appear — restoring the seamless loop the
-local app has today.
-
-## Non-goals for v1
-
-- Sync between two devices from a single user (they can log in from both
-  browsers and both uploaders will push to the same account, so effectively
-  synced anyway; no explicit "multi-device" primitive)
-- Editing maps or replays server-side
-- Real-time collaboration
-- Anything requiring modification to osu! itself
-
-## Architecture at a glance
+## Components
 
 ```
-[osu! Songs/ + Data/r/]                  [Browser]
-        │                                    │
-        ▼                                    ▼
-[uploader companion]  ────────► [FastAPI web service] ◄──── [osu! OAuth]
+[osu! Songs/ + Data/r/]                        [Browser]
+        │                                          │
+        ▼                                          ▼
+[Tauri uploader companion]  ────► [FastAPI + SQLite] ◄──── [osu! OAuth]
    watches folder                       │
    POSTs new .osr                       ▼
-                                   [Postgres]
-                                    (shared catalog +
-                                     per-user replays/snapshots)
+                                 workspace/*.db
+                                (shared catalog + per-user replays)
 ```
 
-**Two client surfaces**, one server:
-- Browser = read + configure (Log in with osu!, view report, browse others,
-  trigger refresh)
-- Uploader companion = write-only (auth token → POST /upload/replay for each
-  new file it sees)
+**Three surfaces**, one server:
 
-The server never talks to the user's disk. Everything crosses the wire as
-either a browser action or a POST from the uploader.
+- **Browser** (session cookie): read own + public reports, browse
+  leaderboards, upload one-off replays, edit settings.
+- **Uploader companion** (bearer token): auto-uploads `.osr` files.
+  Explicitly cannot read anything back — blast-radius design keeps a
+  compromised uploader token to "spam my own replay list."
+- **Python CLI** (no auth): local single-user use. Same code paths, just
+  runs against a local workspace directory instead of the hosted one.
 
-## Data model
+## Storage
 
-Multi-tenant with two shapes of table:
+**SQLite, not Postgres.** The Postgres swap is on the backlog (task #66)
+but has never surfaced as a real bottleneck. A workspace directory
+contains:
 
-### Shared tables (no user_id)
-
-Public information — the same for everyone, deduplicated across the whole
-service.
-
-- `maps` — catalog. Deduped by md5. First user to upload a map contributes
-  it to the global pool; everyone else's replays link to that same row.
-- `catalog_meta` — service-level config
-
-### Per-user tables (`user_id` FK)
-
-Owned by one user, visible per that user's privacy settings.
-
-- `users` — profile. One row per authenticated osu! account.
-- `replays` — the .osr uploads with judgment/classification/mods
-- `snapshots` — session skill vectors
-- `player_info` → collapses into `users` (osu profile fields live there)
-
-Migration from the current per-player SQLite: existing local `<name>.db`
-maps 1:1 to `(users.id = X, replays.user_id = X)` rows. The migration
-script (Task #68) handles the shape change.
-
-### `users` schema
-
-```sql
-CREATE TABLE users (
-  id                  BIGSERIAL PRIMARY KEY,
-  osu_user_id         BIGINT UNIQUE NOT NULL,
-  osu_username        TEXT NOT NULL,
-  osu_avatar_url      TEXT,
-  osu_cover_url       TEXT,
-  osu_country_code    TEXT,
-  osu_global_rank     INTEGER,
-  style               TEXT NOT NULL DEFAULT 'unknown',  -- kddk, ddkk, kkdd
-  profile_public      BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_login_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 ```
+workspace/
+├── catalog.db      shared map catalog. One row per unique md5;
+│                   raw .osu blob stored so replays are portable.
+└── <username>.db   one file per user. Their .osr blobs (as content),
+                    judgment results, mods, ratings, snapshots.
+```
+
+Both live on the server filesystem, backed up nightly (see
+`docker-compose.yml`'s `backup` profile).
+
+### Key tables
+
+Catalog:
+
+- `users` — one row per osu! account. `osu_user_id`, `osu_username`,
+  `osu_avatar_url`, `osu_cover_url`, `osu_country_code`,
+  `osu_global_rank`. `profile_public` gates the `/u/{name}` route.
+- `api_tokens` — hashed uploader tokens. `owner_user_id`, `hash`,
+  `last_used_at`.
+- `maps` — deduped by md5. Stores parsed `.osu` blob + the six
+  dimension ratings. Rating lives here (not per-user) because a map's
+  difficulty is the same for everyone.
+
+Per-player DB (`<username>.db`):
+
+- `player_info` — style (`kddk` / `ddkk` / `kkdd` / `unknown`),
+  osu profile mirror, map search roots.
+- `replays` — one row per uploaded `.osr`. Full content BLOB, judgment
+  counts, effective mod-adjusted ratings, `content_hash` (sha256 of
+  first 512 bytes — used by the uploader to cross-reference).
+- `snapshots` — the skill vector at each point in time. Recomputed on
+  every ingest. Rows: `skill_speed`, `skill_stamina`, `skill_gimmick`,
+  `skill_technical`, `skill_consistency`, `skill_reading`,
+  `replays_used`, `latest_replay_played_at`.
 
 ## Auth
 
-- **Login**: osu! OAuth 2.0 authorization code flow. User clicks "Log in
-  with osu!" → redirect to osu! → callback with code → exchange for token →
-  fetch profile → upsert users row → issue signed session cookie
-- **Session cookie**: httpOnly, secure, SameSite=Lax. Contains signed
-  `user_id` + issued_at. Expires 30 days, refreshed on each visit
-- **Uploader companion auth**: on first launch, opens browser to
-  `/uploader/auth`. User approves. Server issues a long-lived API token
-  (opaque, revocable) that the uploader stores locally
-- **Middleware**:
-  - `require_login` — 302 to `/login` if no session
-  - `current_user_or_none` — sets `request.state.user` if logged in, None
-    otherwise. Used on public routes so we can highlight "this is you"
-  - `require_api_token` — for uploader endpoints; header `Authorization:
-    Bearer <token>`
+- **Web login**: osu! OAuth 2.0 authorization code flow. Callback runs
+  `ensure_player_db_for_user` (creates their per-player DB if missing)
+  and issues a signed session cookie (`itsdangerous`-backed, HttpOnly,
+  SameSite=Lax, 30-day expiry rolling).
+- **Uploader auth**: bearer token minted at `/settings/tokens`. Stored
+  hashed server-side; opaque + revocable. Rate-limited implicitly via
+  `INSERT OR IGNORE` uniqueness on `(map_md5, played_at)`.
+- **Middleware**: three helpers on the request path — `current_user`
+  (session cookie → user row or None), `require_login` (302 to `/`),
+  `require_api_token` (parses `Authorization: Bearer …`).
 
-## URL structure
+Local mode has no auth — `TAIKO_TRAINER_MODE=local` (or unset) skips
+OAuth entirely and treats everyone as user_id=1.
+
+## Routes
+
+Web pages:
 
 ```
-/                                landing / login prompt for anon; feed for logged in
-/login                           OAuth start
-/oauth/callback                  OAuth exchange
-/logout                          clear session
+/                                landing / feed
+/login  /oauth/callback  /logout OAuth flow
 
-/u/{osu_username}                public player report (respects profile_public)
-/u/{osu_username}/train/{dim}    public per-dim recommendations
-/u/{osu_username}/replay/{id}    public replay detail (respects visibility)
+/u/{osu_username}                public player report
+/u/{osu_username}/train/{dim}    per-dim recommendations
+/replay/{player}/{id}            one replay's judgment breakdown
+/replay/{player}/{id}/inspect    per-note inspector for debugging scoring
+/replay/{player}/{id}/osr        download the raw .osr file
 
-/me                              redirect to /u/<your_username>
+/me                              redirect to /u/<self>
 /settings                        style, profile visibility, delete account
-/upload                          drag-and-drop web upload (browser fallback)
+/settings/tokens                 mint / revoke uploader tokens
 
-/map/{md5}                       shared map detail — leaderboards per mod
-/compare/{a}/{b}                 side-by-side skill vectors
+/leaderboards                    total-skill top-N + six per-dim columns
+/leaderboards/{dim}              full ranking for one dimension
 
-/api/v1/replays                  POST — uploader companion / web upload
-/api/v1/uploader/token           GET/POST — token issuance
-/api/v1/health                   uptime probe
+/maps                            browsable map catalog with filters
+/map/{md5}                       map detail — ratings + top plays
+
+/upload#companion                install instructions + download button
+/upload                          drag-drop web upload (one-off imports)
+/download                        302 → /upload#companion
 ```
 
-Note: player pages moved from `/player/{name}` (local) to `/u/{osu_username}`
-(web). `/u/` mirrors GitHub / osu! conventions and disambiguates from other
-top-level routes.
+Uploader-facing API:
 
-## Endpoint boundaries — what the browser vs uploader can do
+```
+GET  /api/v1/whoami              identity for the Home identity band
+GET  /api/v1/me/skill            skill snapshot + total-skill rank
+GET  /api/v1/me/replays          user's replays + content hashes
+POST /api/v1/replays             upload one .osr (multipart)
+POST /api/v1/maps                seed catalog with a .osu (idempotent)
+```
 
-**Browser** (session cookie):
-- Read anything public
-- Read own private data
-- Trigger refresh on own data
-- Delete own data
-- Change settings
+Public health:
 
-**Uploader** (API token):
-- POST /api/v1/replays with an .osr file
-- Nothing else. Explicitly cannot delete, cannot read
+```
+GET  /api/status                 uptime + workspace stats
+```
 
-Blast-radius design: a compromised uploader token can spam a user's own
-replay list at worst, not modify anything else.
+## Scoring pipeline
 
-## Rate limiting
+Same code path whether triggered by browser upload, uploader companion
+POST, or CLI. Follow `workflow.py::add_replay`:
 
-- Uploader: 100 replays per 5 minutes per token (real bulk uploads finish
-  in seconds; genuine over-100 usage is a red flag)
-- Browser: 60 requests per minute per session, 30 per minute per IP for
-  anon
-- Public API: 200 per 5 minutes per IP
+1. **Parse the .osr** (`osr_parser`). Extract player name, mods,
+   played_at, key events, reported counts. Detect if lazer via
+   `game_version >= 30_000_000` or extra bytes past the stable layout.
+2. **Resolve the map**. Try catalog first by md5. If missing, walk the
+   player's configured Songs roots. If still missing and osu! API is
+   configured, fall back to a live API fetch.
+3. **Judge every note** (`judgment.judge_replay`). Pair each hittable
+   note with the earliest color-matching key-down within the OD-scaled
+   miss window. Classify as GREAT / OK / MISS. Lazer mode skips the
+   stable notelock rule.
+4. **Extract features** (`features.extract_features`). Per-map: BPM
+   distribution, density windows, mono-color runs, SV changes,
+   note-diameter kickbacks, denden count.
+5. **Rate the map** (`scoring.rate_map`). Six numbers from the features
+   + the effective mods bitfield. Cached on `maps.rating_{dim}` — only
+   recomputed on `refresh`.
+6. **Classify missing** (`classification.classify_misses`). Bucket each
+   miss by cause (speed cap, denden overload, mono-run fatigue, etc.).
+7. **Compute effective rating**. Base map rating × mod multipliers × an
+   accuracy scaling. Stored on the replay row.
+8. **Update snapshot** (`player.compute_player_skill`). Per-dim, keep
+   the best score per (map_title, map_diff), sort desc, weight by
+   `0.9 ** rank`, sum. Same structural pattern as pp.
 
-## Storage sizing (rough)
+## Uploader companion
 
-Small `.osr`: 20-80 KB. 1000 users × 100 replays each × 60 KB avg = 6 GB.
-Well within free-tier limits. Maps table growth is bounded because we dedup
-by md5 (there are ~50-100K ranked taiko maps total; if the whole ranked pool
-gets ingested, that's ~5 GB of .osu blobs).
+Tauri 2 app under `uploader-app/`. See `uploader-app/README.md` for
+implementation details; key contract:
 
-## Migration strategy from current local
+- Watches the configured folder via `notify`.
+- New `.osr` → 500ms settle → HTTP multipart to `/api/v1/replays`.
+- Retries with exponential backoff (2s → 60s cap) on 5xx / network.
+- Auth failures (401), foreign-replay (403), duplicates (409) are
+  terminal skips; recorded locally so we don't re-attempt.
+- SKIPPED_HISTORIC snapshot on startup — every existing `.osr` is
+  marked as "already seen" so the watcher only touches genuinely-new
+  plays. Explicit `Backfill` / selective-upload paths let users opt
+  into historic imports.
+- Emits status events to the UI (`starting` / `watching` / `uploading`
+  / `error` / `no_config`) with a shared `Mutex<StatusPayload>` slot
+  so late-attaching listeners still see the current state via
+  `get_current_status` command.
+- Auto-updates against signed `latest.json` on GitHub Releases —
+  minisign signature verified against the pubkey baked into
+  `tauri.conf.json`.
 
-Two paths, non-mutually-exclusive:
+## Rate ratings — the six dimensions
 
-1. **Uploader companion + web upload flow** — new users get everything from
-   the moment they log in and point the uploader at Data/r/. Backfill any
-   old replays via drag-and-drop bulk upload.
+| Dim         | What it measures                                    |
+|-------------|-----------------------------------------------------|
+| speed       | Motor tempo demand. Peak sustained BPM at density.  |
+| stamina     | Per-note strain accumulation over a whole map.      |
+| gimmick     | SV surprises, aspect kickbacks, denden overload.    |
+| technical   | Sustained mid-density divisor complexity.           |
+| consistency | Note-diameter timing tightness across a session.    |
+| reading     | Physics-based runway_ms + motor-cognitive coupling. |
 
-2. **`taiko-trainer migrate --workspace <path>`** — reads a local sqlite
-   workspace, POSTs its maps + replays + snapshots to the service under the
-   authenticated user's id. Idempotent (map md5 dedup, replay unique on
-   (map_md5, played_at)).
+Each ranges 0..∞ but real maps top out around 4000-6000 per dim.
+Formulas live in `scoring.py`; see `player.py` for the aggregation.
 
-The local single-user app keeps working. It's the same codebase; multi-user
-mode is `user_id = 1` by default when no auth is configured. This is
-important for the transition — the user's local workflow doesn't break
-while we build the hosted version.
+Playstyle affects **stamina** (KDDK never does same-hand consecutive
+hits at fast tempo; DDKK naturally does on mono-color runs) and
+**consistency** (cheese detection). The `style` column on
+`player_info` drives this — set via `/settings` or `taiko-trainer
+player`.
 
-## What stays untouched
+## Non-goals
 
-- All scoring logic (`scoring.py`, `features.py`, `player.py`,
-  `classification.py`)
-- All mod handling (`mods.py`, `judgment.py`)
-- All rating dimensions (speed, stamina, gimmick, technical, consistency,
-  reading)
-- The HTML/CSS in `server.py` — mostly. Some routes rename, some public
-  pages get privacy checks, but the render functions are unchanged
+- Real-time collaboration
+- Modifying maps or replays server-side
+- osu! itself talking to us — no plugin, no mod, no injection
+- Postgres migration until write concurrency actually matters
 
-The web build is a routing + auth + storage adaptation. Not a rewrite.
+## What's not built yet
 
-## Deploy
+- `#66` SQLite → Postgres. Deferred until write concurrency matters.
+- `#105` Per-map replay history + progression chart on the map detail
+  page.
+- `#113` Identity gate when a user renames on osu!.
+- `#117` Split-ladder view (stable-only vs. lazer-including).
 
-- **v1 dev instance**: Docker container on either Oracle Cloud Always Free
-  ARM VM or $5/mo Hetzner. Postgres via Neon.tech free tier (0.5 GB) or
-  co-located on same box
-- **v1 public**: same shape, moved onto a right-sized paid host if needed.
-  Cloudflare in front (free) for CDN + HTTPS + basic DDoS
-- **Backups**: daily pg_dump to remote object storage (Backblaze B2 free
-  tier, or Cloudflare R2)
+## Deploy shape
 
-## Order of implementation
-
-The tasks (#63-#69) run roughly in this order. Each phase leaves the app in
-a working state — you can always run the local single-user version off
-`main` while `web` is under construction.
-
-1. Auth scaffolding — osu! OAuth flow, session cookies (#63)
-2. Schema multi-tenancy — user_id columns, users table, local workspace
-   migration to "single user" (#64)
-3. Routes adapt to auth-aware — public vs private, session context (#65)
-4. Postgres swap — DB abstraction, connection string, migrations (#66)
-5. Uploader companion — separate small binary (#67)
-6. Local→hosted migration script (#68)
-7. Deploy dev instance (#69)
-
-## Decisions deferred until we have a working prototype
-
-- Public API: whether to expose read-only endpoints for third parties
-- Comparison / leaderboard UI shapes (do it after real users tell us what
-  they want to compare)
-- Notifications (probably never)
-- Discord bot / integration (probably later, if community interest)
-- Custom map ratings (users tagging maps with their own difficulty
-  assessment) — interesting but explodes the surface
+Docker Compose on a small VM behind Cloudflare Tunnel. See
+`DEPLOY.md` for the walkthrough. Costs $0–6/month at hobby scale.

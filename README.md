@@ -1,59 +1,54 @@
 # taiko-trainer
 
-A local osu!taiko training assistant. Parses maps and replays, produces a 5-D
-map rating (`speed / stamina / gimmick / technical / consistency`), judges
-replays against OD-scaled windows, classifies each miss by its likely cause,
-detects KDDK cheese moments, aggregates a player skill vector, groups
-replays into training sessions, and suggests maps to push your weakest
-dimension.
+An osu!taiko training assistant that ranks your maps and replays on **six
+skill dimensions** — speed, stamina, gimmick, technical, consistency,
+reading — then tells you which dimension is holding you back and which
+specific maps would push it forward.
 
-Runs offline. Reads .osu and .osr files. Persists to two SQLite databases
-per workspace: `catalog.db` (shared maps) and `<player>.db` (per-player plays).
-Both are fully self-contained — the raw .osu and .osr file bytes are stored
-as BLOBs, so a workspace directory is portable to any machine.
+Ships in two shapes:
 
-Ships with a **local web UI** (FastAPI) that you can point your browser at.
+- **Hosted** (recommended): use the public instance at
+  <https://taiko.umaladder.moe>. Log in with your osu! account, install the
+  uploader companion, and every replay you export uploads automatically.
+- **Local**: clone the repo, run the CLI + local web UI against your own
+  `.osu` + `.osr` files. No network, no accounts. Same scoring code as the
+  hosted instance.
 
-## Requirements
+## Using the hosted instance
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) (recommended)
-- Git (for pulling updates)
+1. **Log in** at <https://taiko.umaladder.moe> with osu! OAuth.
+2. **Install the uploader companion** — big button on
+   <https://taiko.umaladder.moe/download>. Windows only for now, ~2.4 MB
+   NSIS installer, auto-updates.
+3. **Paste your uploader token** from `/settings/tokens` into the app,
+   confirm your Replays folder, hit Save.
+4. **Play**. On the results screen press **F2** to export the replay
+   (`.osr`) — the uploader picks it up seconds later, uploads it, and
+   pops a toast showing what skill you gained.
 
-## Install
+That's the whole loop. Your report at `/u/<your-username>` updates in
+place; `/leaderboards` ranks everyone with a public profile.
+
+## Using it locally
+
+You'll want this if you're offline, on Linux, or hacking on the scoring
+model.
 
 ```bash
-git clone <your-repo-url> taiko-trainer
-cd taiko-trainer
-uv sync
+git clone https://github.com/Acrith/osu-taiko-trainer
+cd osu-taiko-trainer
+uv sync                      # requires uv — https://docs.astral.sh/uv/
 ```
 
-That's it. `uv sync` reads `pyproject.toml` + `uv.lock`, creates a virtualenv,
-installs dependencies.
-
-## First-time setup
-
-Pick a workspace directory (e.g. `~/taiko`). Point the trainer at your osu!
-Songs folder so replays can find their maps automatically. Register yourself:
+Pick a workspace directory and point it at your osu! Songs folder so
+replays can find their maps automatically:
 
 ```bash
 mkdir -p ~/taiko
-cd ~/taiko
-
-# Point at your Songs folder so replays can resolve their maps
 uv run taiko-trainer roots ~/taiko YourName add "C:/Users/you/AppData/Local/osu!/Songs"
-#  (or ~/Library/Application Support/osu/Songs on macOS,
-#   ~/.local/share/osu/Songs on Linux)
-
-# Register your playstyle (kddk = outer=kat, inner=don; ddkk / kkdd for color-per-hand)
-uv run taiko-trainer player ~/taiko YourName kddk
-
-# Add a replay — the trainer resolves the map from your Songs folder automatically
+uv run taiko-trainer player ~/taiko YourName kddk    # or ddkk / kkdd
 uv run taiko-trainer add ~/taiko "path/to/replay.osr"
-
-# Start the web UI
-uv run taiko-trainer serve --ws ~/taiko
-# then open http://localhost:8000 in your browser
+uv run taiko-trainer serve --ws ~/taiko              # opens http://localhost:8000
 ```
 
 Every subsequent replay is one command:
@@ -62,79 +57,80 @@ Every subsequent replay is one command:
 uv run taiko-trainer add ~/taiko "path/to/new-replay.osr"
 ```
 
-## Web UI
+### CLI reference
 
-```bash
-uv run taiko-trainer serve --ws ~/taiko
-# defaults: --host 127.0.0.1 --port 8000
-```
-
-Pages:
-- `/` — home: workspace status, players list, map roots, upload drop-zone
-- `/player/<name>` — training report: skill vector, dominant miss causes,
-  session comparison, suggested maps
-- `/replay/<player>/<id>` — one replay's judgment + classification breakdown
-
-Drop a .osr on the home page and it runs through the full pipeline (map
-resolution → judgment → classification → snapshot update) then redirects
-you to the updated report.
-
-## CLI reference
-
-Every command takes a workspace path as its first arg. Defaults to `.` when
-omitted, so you can `cd` into your workspace and drop the arg.
+Every command takes a workspace path as its first arg. Defaults to `.`
+when omitted, so you can `cd` into your workspace and drop the arg.
 
 ```
-status <ws>                     workspace overview
-ingest <ws> <root>              bulk ingest all .osu/.osr under a root
-add <ws> <replay> [--map <osu>] add ONE replay, auto-resolving its map
-add-map <ws> <osu>              add a single .osu to the catalog
+status [<ws>]                       workspace overview
+ingest <ws> <root>                  bulk ingest all .osu/.osr under a root
+add <ws> <replay> [--map <osu>]     add ONE replay, auto-resolving its map
+add-map <ws> <osu>                  add a single .osu to the catalog
 roots <ws> <player> add|remove|list <path>
-                                per-player map search roots
-refresh <ws>                    re-parse stored blobs + recompute all ratings
-                                (run this after pulling a new version)
+                                    per-player map search roots
+refresh <ws>                        re-parse stored blobs + recompute all ratings
+                                    (run this after pulling a new version)
+migrate --workspace <ws> --server <url> --token <t> [--player <name>] [--dry-run]
+                                    push a local workspace to a hosted instance
+cleanup --workspace <ws> [--commit] drop maps that fail the ingest gate + orphan replays
+                                    (dry-run by default; --commit to apply)
+scan-lazer --workspace <ws> [--commit]
+                                    find (and optionally delete) lazer replays with
+                                    custom-rate DT/HT that predate the ingest gate
 player <ws> <player> <style> [notes]
-                                register or update a player's playstyle
-report <ws> <player>            training report in the terminal
-validate                        verify reference-map diagonals still pass
+                                    register or update a player's playstyle
+report <ws> <player>                training report in the terminal
+validate                            verify reference-map diagonals still pass
 serve [--ws <path>] [--host <h>] [--port <p>]
-                                start the local web UI
+                                    start the local web UI
 ```
 
-## What lives where
-
-```
-<workspace>/
-├── catalog.db        1-few MB — shared map catalog (parsed .osu content as BLOBs)
-├── <player>.db       hundreds of KB — one file per player (their .osr blobs + judged stats)
-└── ...
-```
-
-Everything is portable. Copy the workspace directory anywhere and it works.
-
-## Updating
+### Updating a local install
 
 ```bash
-cd taiko-trainer
 git pull
-uv sync                       # in case dependencies changed
-uv run taiko-trainer refresh ~/taiko   # re-rate all cached maps with the new formulas
+uv sync
+uv run taiko-trainer refresh <workspace>   # re-rate cached maps + snapshots
 ```
 
-The `refresh` step re-parses every stored .osu BLOB and re-computes its
-rating. Your play history is untouched — only the cached ratings and derived
-skill snapshots update.
+`refresh` re-parses every stored `.osu` blob and re-computes its rating
+against the new formulas. Play history is untouched — only cached
+ratings and the derived skill snapshots update.
 
 ## Playstyles
 
-- **kddk** (default): outer keys = kats, inner = dons. Every note alternates hands (L-R-L-R).
-- **ddkk**: left hand plays all dons, right hand plays all kats. Color-per-hand.
+- **kddk** (default): outer keys = kats, inner = dons. Every note
+  alternates hands (L-R-L-R). Most common competitive style.
+- **ddkk**: left hand plays all dons, right hand plays all kats.
+  Color-per-hand.
 - **kkdd**: mirror of ddkk (left = kats).
 - **unknown**: no playstyle set. Cheese rate interpretation is best-guess.
 
-The playstyle affects how the "cheese rate" metric is interpreted (KDDK
+Playstyle affects the "stamina" and "consistency" dimensions (KDDK
 players never do same-hand consecutive hits at fast tempo; DDKK players
 naturally do same-hand on mono-color runs).
+
+## Workspace layout
+
+Whether hosted or local, one workspace directory holds:
+
+```
+<workspace>/
+├── catalog.db        1–few MB — shared map catalog (parsed .osu blobs)
+├── <player>.db       hundreds of KB — per-player plays + snapshots
+└── ...
+```
+
+Everything is portable. Copy the workspace directory anywhere and it
+works. The hosted instance uses the same shape server-side.
+
+## More docs
+
+- **`uploader-app/README.md`** — Tauri companion internals + release flow
+- **`ARCHITECTURE.md`** — hosted service data model, auth, routes,
+  scoring pipeline
+- **`DEPLOY.md`** — running your own hosted instance from scratch
 
 ## License
 
