@@ -54,6 +54,9 @@ excludes = [
     "taiko_trainer.models",
     "taiko_trainer.config",
     "taiko_trainer.auth",
+    # Added post-initial-spec:
+    "taiko_trainer.cleanup",
+    "taiko_trainer.scan_lazer",
 ]
 
 
