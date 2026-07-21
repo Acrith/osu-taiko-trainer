@@ -54,6 +54,25 @@ jobs:
       - name: Install npm deps
         run: npm install
 
+      # For tag builds: force the version baked into the binary to match
+      # the tag name — otherwise a forgotten Cargo.toml bump ships a
+      # binary that reports the OLD version, the manifest says the NEW
+      # version, and the updater loops forever ("install this newer
+      # version" → nothing changes → prompt again).
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/uploader-v')
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^uploader-v', ''
+          Write-Host "Syncing version $version into Cargo.toml + tauri.conf.json"
+          $cargo = Get-Content "uploader-app/src-tauri/Cargo.toml" -Raw
+          $cargo = $cargo -replace '(?m)^version = ".*?"', "version = ""$version"""
+          Set-Content "uploader-app/src-tauri/Cargo.toml" $cargo -NoNewline
+          $conf = Get-Content "uploader-app/src-tauri/tauri.conf.json" -Raw
+          $conf = $conf -replace '"version": ".*?"', "`"version`": `"$version`""
+          Set-Content "uploader-app/src-tauri/tauri.conf.json" $conf -NoNewline
+
       - name: Build Tauri bundle
         run: npm run tauri build -- --verbose
 
