@@ -3743,21 +3743,16 @@ def _render_replay(row: dict, player: str, features=None, judged=None, peer_repl
     warning_html = _render_discrepancy_warning(row)
     hero_section = _render_map_hero(row, player)
 
-    # "Your contribution" panel — per-dim raw contribution (rating × accuracy
-    # scaling), plus whether THIS play currently counts in the player's
-    # snapshot (only best-per-map counts per dim; a better attempt on the
-    # same map blocks this one). See player.compute_player_skill for the
-    # de-dup semantics.
+    # Per-dim raw contribution (rating × accuracy_scaling) + whether THIS
+    # play currently feeds the player's snapshot (only best-per-map counts
+    # per dim). Rendered INSIDE the Map rating card as a second line under
+    # each dim so the two numbers read as one story. See
+    # player.compute_player_skill for the de-dup semantics.
     _DIMS_ORDER = ("speed", "stamina", "gimmick", "technical", "consistency", "reading")
-    contrib_section = ""
+    contrib_by_dim: dict[str, tuple[float, bool, float]] = {}   # dim → (my_v, counts, best_v)
     if peer_replays:
-        my_acc = row.get("accuracy_judged") or 0.0
-        my_scale = _acc_scale(my_acc)
-        my_rating = {d: row.get(f"rating_{d}") or 0.0 for d in _DIMS_ORDER}
-        my_contrib = {d: my_rating[d] * my_scale for d in _DIMS_ORDER}
-
-        # Best contribution per dim across all this player's replays on this map
-        best_per_dim = {d: (None, 0.0) for d in _DIMS_ORDER}  # (replay_id, value)
+        my_scale = _acc_scale(row.get("accuracy_judged") or 0.0)
+        best_per_dim: dict[str, tuple[int | None, float]] = {d: (None, 0.0) for d in _DIMS_ORDER}
         for pr in peer_replays:
             p_scale = _acc_scale(pr.get("accuracy_judged") or 0.0)
             if p_scale <= 0:
@@ -3766,45 +3761,28 @@ def _render_replay(row: dict, player: str, features=None, judged=None, peer_repl
                 v = (pr.get(f"rating_{d}") or 0.0) * p_scale
                 if v > best_per_dim[d][1]:
                     best_per_dim[d] = (pr["id"], v)
-
-        rows_html = ""
         for d in _DIMS_ORDER:
-            my_v = my_contrib[d]
+            my_v = (row.get(f"rating_{d}") or 0.0) * my_scale
             best_id, best_v = best_per_dim[d]
-            counts = (best_id == row["id"])
-            badge = (
-                '<span class="contrib-badge counts">counts</span>'
-                if counts else
-                f'<span class="contrib-badge beaten" title="Beaten by replay #{best_id} — {best_v:.0f}">beaten by #{best_id}</span>'
-            )
-            delta = ""
-            if not counts and best_v > 0:
-                delta = f' <span class="contrib-delta">Δ −{best_v - my_v:.0f}</span>'
-            rows_html += (
-                f'<div class="contrib-row">'
-                f'  <span class="contrib-dim">{d}</span>'
-                f'  <span class="contrib-val">{my_v:.0f}</span>'
-                f'  {badge}{delta}'
-                f'</div>'
-            )
-        contrib_section = f"""
-  <section class="card">
-    <h2>Your contribution</h2>
-    <p class="hint">This replay's raw dim contribution (rating × accuracy). Only the best-per-map play counts toward your snapshot for each dim — a stronger attempt on the same map here blocks the others.</p>
-    <div class="contrib-list">{rows_html}</div>
-    <style>
-      .contrib-list {{ display: grid; grid-template-columns: 1fr; gap: 4px; margin-top: 8px; }}
-      .contrib-row {{ display: grid; grid-template-columns: 100px 80px 1fr; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 12px; }}
-      .contrib-row:last-child {{ border-bottom: none; }}
-      .contrib-dim {{ color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.1em; font-size: 10px; }}
-      .contrib-val {{ color: var(--ink); font-size: 16px; text-align: right; font-variant-numeric: tabular-nums; }}
-      .contrib-badge {{ font-size: 9px; padding: 2px 8px; border-radius: 2px; letter-spacing: 0.12em; text-transform: uppercase; border: 1px solid; }}
-      .contrib-badge.counts {{ color: var(--great); border-color: var(--great); background: rgba(70,180,110,0.10); }}
-      .contrib-badge.beaten {{ color: var(--ink-faint); border-color: var(--rule); background: rgba(255,255,255,0.02); }}
-      .contrib-delta {{ color: var(--ink-faint); font-size: 10px; margin-left: 8px; }}
-    </style>
-  </section>
-"""
+            contrib_by_dim[d] = (my_v, best_id == row["id"], best_v)
+
+    def _dim_cell(dim: str, map_rating: float) -> str:
+        contrib_html = ""
+        if dim in contrib_by_dim:
+            my_v, counts, best_v = contrib_by_dim[dim]
+            if counts:
+                sub = f'<span class="contrib-you">{my_v:.0f}</span><span class="contrib-tag counts" title="This play is your best attempt on this map for {dim} — it feeds your snapshot.">✓</span>'
+            else:
+                gap = best_v - my_v
+                sub = f'<span class="contrib-you dim">{my_v:.0f}</span><span class="contrib-tag beaten" title="A stronger attempt on this map wins for {dim}: {best_v:.0f} (Δ −{gap:.0f}).">−{gap:.0f}</span>'
+            contrib_html = f'<span class="contrib-line">{sub}</span>'
+        return (
+            f'<div class="stat stat-contrib">'
+            f'<span class="k">{dim}</span>'
+            f'<span class="v">{map_rating:.0f}</span>'
+            f'{contrib_html}'
+            f'</div>'
+        )
 
     body = f"""
   <section class="eyebrow-row">
@@ -3816,18 +3794,30 @@ def _render_replay(row: dict, player: str, features=None, judged=None, peer_repl
   {warning_html}
 
   <section class="card">
-    <h2>Map rating</h2>
-    <div class="stats-row">
-      <div class="stat"><span class="k">speed</span><span class="v">{row['rating_speed']:.0f}</span></div>
-      <div class="stat"><span class="k">stamina</span><span class="v">{row['rating_stamina']:.0f}</span></div>
-      <div class="stat"><span class="k">gimmick</span><span class="v">{row['rating_gimmick']:.0f}</span></div>
-      <div class="stat"><span class="k">technical</span><span class="v">{row['rating_technical']:.0f}</span></div>
-      <div class="stat"><span class="k">consistency</span><span class="v">{row['rating_consistency']:.0f}</span></div>
-      <div class="stat"><span class="k">reading</span><span class="v">{(row.get('rating_reading') or 0):.0f}</span></div>
+    <div class="rating-header">
+      <h2>Map rating</h2>
+      {'<span class="rating-sub">· your contribution</span>' if contrib_by_dim else ''}
     </div>
+    <div class="stats-row">
+      {_dim_cell("speed", row['rating_speed'])}
+      {_dim_cell("stamina", row['rating_stamina'])}
+      {_dim_cell("gimmick", row['rating_gimmick'])}
+      {_dim_cell("technical", row['rating_technical'])}
+      {_dim_cell("consistency", row['rating_consistency'])}
+      {_dim_cell("reading", row.get('rating_reading') or 0)}
+    </div>
+    <style>
+      .rating-header {{ display: flex; align-items: baseline; gap: 12px; }}
+      .rating-sub {{ font-family: var(--font-mono); color: var(--ink-muted); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; }}
+      .stat.stat-contrib {{ display: grid; grid-template-columns: 1fr; align-content: start; row-gap: 2px; }}
+      .contrib-line {{ display: flex; align-items: baseline; gap: 8px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--rule); font-family: var(--font-mono); }}
+      .contrib-you {{ color: var(--ink); font-size: 16px; font-variant-numeric: tabular-nums; }}
+      .contrib-you.dim {{ color: var(--ink-muted); }}
+      .contrib-tag {{ font-size: 10px; padding: 1px 6px; border-radius: 2px; letter-spacing: 0.06em; border: 1px solid; }}
+      .contrib-tag.counts {{ color: var(--great); border-color: var(--great); background: rgba(70,180,110,0.10); font-weight: bold; }}
+      .contrib-tag.beaten {{ color: var(--ink-faint); border-color: var(--rule); font-variant-numeric: tabular-nums; }}
+    </style>
   </section>
-
-  {contrib_section}
 
   {features_section}
 
