@@ -57,3 +57,9 @@ export const stats = writable({
 
 // The URL the shipped binary points at unless the config overrides it.
 export const defaultServerUrl = writable("https://taiko.umaladder.moe");
+
+// Version string reported by the compiled binary (via Tauri's
+// getVersion()). Populated once at startup; UI reads this instead of
+// hardcoding — one number, always right, matches what the updater
+// compares against.
+export const appVersion = writable("");

@@ -1,7 +1,10 @@
 <script>
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { appVersion } from "../stores.js";
 
-  const VERSION = "0.2.0";
+  let version = $state("");
+  appVersion.subscribe(v => (version = v));
+
   const SITE = "https://taiko.umaladder.moe";
   const REPO = "https://github.com/Acrith/osu-taiko-trainer";
 </script>
@@ -20,7 +23,7 @@
   <div class="grid">
     <div class="cell">
       <div class="cell-k">Version</div>
-      <div class="cell-v mono">v{VERSION}</div>
+      <div class="cell-v mono">{version ? `v${version}` : "…"}</div>
     </div>
     <div class="cell">
       <div class="cell-k">Runtime</div>

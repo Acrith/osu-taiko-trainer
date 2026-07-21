@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { listen } from "@tauri-apps/api/event";
   import Sidebar from "./lib/Sidebar.svelte";
   import UploadResultToast from "./lib/UploadResultToast.svelte";
@@ -12,7 +13,7 @@
   import About from "./lib/screens/About.svelte";
   import {
     currentScreen, status, whoami, config, recentActivity, stats,
-    defaultServerUrl, mySkill, myReplays, lastGain,
+    defaultServerUrl, mySkill, myReplays, lastGain, appVersion,
   } from "./lib/stores.js";
 
   const DIMS = ["speed", "stamina", "gimmick", "technical", "consistency", "reading"];
@@ -26,6 +27,11 @@
   currentScreen.subscribe(v => (screen = v));
 
   onMount(async () => {
+    // Grab the running binary's version so Sidebar / About stay honest
+    // regardless of what package.json or hardcoded strings say. Tauri
+    // sources this from Cargo.toml at build time.
+    getVersion().then(v => appVersion.set(v)).catch(() => {});
+
     // Fire-and-forget update check on launch (3s delay, silent on
     // failure — see lib/updater.js).
     scheduleUpdateCheck();

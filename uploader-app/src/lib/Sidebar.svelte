@@ -1,5 +1,5 @@
 <script>
-  import { currentScreen } from "./stores.js";
+  import { currentScreen, appVersion } from "./stores.js";
 
   const items = [
     { key: "home",     label: "Home"     },
@@ -10,6 +10,9 @@
 
   let screen = $state("home");
   currentScreen.subscribe(v => (screen = v));
+
+  let version = $state("");
+  appVersion.subscribe(v => (version = v));
 </script>
 
 <aside class="sidebar">
@@ -33,7 +36,7 @@
 
   <div class="spacer"></div>
 
-  <div class="version">v0.2.0 · tauri</div>
+  <div class="version">{version ? `v${version}` : ""} · tauri</div>
 </aside>
 
 <style>
