@@ -403,11 +403,14 @@ class _MainWindow:
         cfg_frame.columnconfigure(1, weight=1)
 
         actions = ttk.Frame(cfg_frame)
-        actions.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(12, 0))
+        actions.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(12, 0))
+        # Left cluster — config-related actions
         ttk.Button(actions, text="Change folder", command=self._on_change_folder).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(actions, text="Change token",  command=self._on_change_token).pack(side=tk.LEFT, padx=6)
-        ttk.Button(actions, text="Open log",       command=self._on_open_log).pack(side=tk.LEFT, padx=6)
-        ttk.Button(actions, text="Hide to tray",   command=self._on_close).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Change token",  command=self._on_change_token).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(actions, text="Open log",       command=self._on_open_log).pack(side=tk.LEFT, padx=(0, 6))
+        # Right cluster — hide-to-tray sits at the right edge with an even
+        # inter-button gap on the left so it doesn't look pinned to the wall.
+        ttk.Button(actions, text="Hide to tray",   command=self._on_close).pack(side=tk.RIGHT, padx=(6, 0))
 
     def _stat_cell(self, parent, label: str, var: tk.StringVar) -> ttk.Frame:
         f = ttk.Frame(parent, borderwidth=1, relief="solid", padding=10)
