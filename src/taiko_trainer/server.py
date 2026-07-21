@@ -5074,11 +5074,20 @@ def _render_upload_page(username: str | None) -> str:
         <div class="companion-step-body">
           <b>Install and open</b> the app.
           <div class="companion-step-note">
-            Windows will show <b>"Windows protected your PC"</b> the first time —
-            the binary isn't code-signed yet. Click <b>More info</b> →
-            <b>Run anyway</b> to proceed. Verified safe by anyone who wants to
-            check: source is on GitHub, no telemetry, no third-party libraries
-            beyond what's in the release manifest.
+            <b>Windows SmartScreen may block first launch</b> — the binary
+            isn't code-signed yet. If you see <b>"Windows protected your PC"</b>,
+            click <b>More info</b> → <b>Run anyway</b>.
+            <br><br>
+            <b>Doesn't open at all after that?</b> Windows sometimes silently
+            blocks downloaded executables (Mark-of-the-Web). Right-click the
+            <code>.exe</code> in Explorer → <b>Properties</b> → at the bottom
+            tick <b>Unblock</b> → <b>OK</b>, then re-open.
+            <br><br>
+            <span class="companion-step-note-tail">Verified safe by anyone
+            who wants to check — source is on
+            <a href="https://github.com/Acrith/osu-taiko-trainer" target="_blank" rel="noopener">GitHub</a>,
+            no telemetry, no third-party libraries beyond what's in the
+            release manifest.</span>
           </div>
         </div>
       </div>
@@ -5190,6 +5199,8 @@ def _render_upload_page(username: str | None) -> str:
       border-left: 2px solid var(--accent-soft); border-radius: 3px;
       font-size: 12px; color: var(--ink-muted); line-height: 1.55;
     }}
+    .companion-step-note b {{ color: var(--ink); }}
+    .companion-step-note-tail {{ color: var(--ink-faint); font-size: 11px; }}
   </style>
   <script>
     const dz = document.getElementById('drop-zone');
