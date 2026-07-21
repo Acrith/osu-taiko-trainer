@@ -75,6 +75,28 @@ impl State {
         ).is_ok()
     }
 
+    /// Look up a single row by filename, or None if it's not in the state
+    /// DB. Used by the Import screen to classify each file in the folder.
+    pub fn lookup(&self, filename: &str) -> Option<Record> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT filename, content_hash, replay_id, uploaded_at, \
+             map_title, map_version, mods, accuracy \
+             FROM uploaded WHERE filename = ?1",
+            params![filename],
+            |row| Ok(Record {
+                filename: row.get(0)?,
+                content_hash: row.get(1)?,
+                replay_id: row.get(2)?,
+                uploaded_at: row.get(3)?,
+                map_title: row.get(4)?,
+                map_version: row.get(5)?,
+                mods: row.get(6)?,
+                accuracy: row.get(7)?,
+            }),
+        ).ok()
+    }
+
     /// Insert or replace a row. `uploaded_at` is stamped by SQLite so it's
     /// consistent with the Python side.
     #[allow(clippy::too_many_arguments)]

@@ -4,6 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import Sidebar from "./lib/Sidebar.svelte";
   import Home from "./lib/screens/Home.svelte";
+  import Import from "./lib/screens/Import.svelte";
   import Uploads from "./lib/screens/Uploads.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import About from "./lib/screens/About.svelte";
@@ -86,6 +87,8 @@
   <main class="stage">
     {#if screen === "home"}
       <Home />
+    {:else if screen === "import"}
+      <Import />
     {:else if screen === "uploads"}
       <Uploads />
     {:else if screen === "settings"}

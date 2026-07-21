@@ -36,6 +36,10 @@ pub enum WorkerCmd {
     /// (including things marked SKIPPED_HISTORIC in a previous session).
     /// User has to opt in explicitly — never happens automatically.
     Backfill,
+    /// Upload a specific list of files — the Import screen's checkbox
+    /// selection. Bypasses the "already uploaded" check so a user can
+    /// deliberately re-attempt something the server previously rejected.
+    UploadFiles(Vec<PathBuf>),
     /// User asked to shut down. Worker drains and exits.
     Shutdown,
 }
@@ -239,6 +243,16 @@ async fn run_with_config(
                     // That's the "explicit historic import" behavior.
                     run_backfill(&app, status_slot, &state, &client, &cfg, &folder).await;
                     // Fall through to keep watching.
+                }
+                WorkerCmd::UploadFiles(paths) => {
+                    // Explicit selection from the Import screen — upload
+                    // exactly what the user checked. Skip the `uploaded()`
+                    // guard so retrying a previously-skipped file works.
+                    for p in paths {
+                        process_one(&app, status_slot, &state, &client, &cfg, &p).await;
+                    }
+                    emit_status(&app, status_slot, "watching",
+                        format!("Watching {}", cfg.replays_folder));
                 }
             },
 

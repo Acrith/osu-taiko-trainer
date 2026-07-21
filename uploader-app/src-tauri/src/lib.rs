@@ -7,6 +7,7 @@ mod http;
 mod watcher;
 mod worker;
 mod commands;
+mod folder;
 mod logging;
 
 use std::sync::Arc;
@@ -63,6 +64,8 @@ pub fn run() {
                 commands::get_recent,
                 commands::fetch_whoami,
                 commands::backfill,
+                commands::list_folder_entries,
+                commands::upload_files,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");

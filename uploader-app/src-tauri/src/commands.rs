@@ -3,9 +3,11 @@
 //! to JSON automatically.
 
 use crate::config::{self, Config};
+use crate::folder::{self, FolderEntry};
 use crate::http;
 use crate::state::{Record, State, Stats};
 use crate::worker::{StatusPayload, StatusSlot, WorkerCmd};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State as TauriState;
 use tokio::sync::mpsc;
@@ -90,6 +92,61 @@ pub async fn backfill(app_state: TauriState<'_, AppState>) -> Result<(), String>
     app_state
         .worker_tx
         .send(WorkerCmd::Backfill)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Return every `.osr` in the current replays folder, joined with the
+/// state DB so the Import screen can classify each one. Config must be
+/// loaded — returns an empty Vec if it isn't (frontend treats that as
+/// "no folder configured yet, show CTA to Settings").
+#[tauri::command]
+pub async fn list_folder_entries(
+    app_state: TauriState<'_, AppState>,
+) -> Result<Vec<FolderEntry>, String> {
+    let cfg = config::load()?;
+    let Some(cfg) = cfg else { return Ok(Vec::new()); };
+    let folder = PathBuf::from(&cfg.replays_folder);
+    if !folder.is_dir() {
+        return Ok(Vec::new());
+    }
+    // Scan reads the directory + does a SELECT per file — offload to a
+    // blocking task so the frontend's invoke doesn't stall the UI thread.
+    let state_arc = app_state.state.clone();
+    tokio::task::spawn_blocking(move || Ok(folder::scan(&state_arc, &folder)))
+        .await
+        .map_err(|e| format!("scan task join error: {}", e))?
+}
+
+/// Upload a specific list of filenames chosen from the Import screen.
+/// The filenames are joined against the configured replays folder — the
+/// frontend never sends a full path so we can't be tricked into reading
+/// files outside the folder.
+#[tauri::command]
+pub async fn upload_files(
+    filenames: Vec<String>,
+    app_state: TauriState<'_, AppState>,
+) -> Result<(), String> {
+    let cfg = config::load()?.ok_or_else(|| "no config".to_string())?;
+    let folder = PathBuf::from(&cfg.replays_folder);
+    let paths: Vec<PathBuf> = filenames
+        .into_iter()
+        .filter_map(|f| {
+            // Reject anything with a path separator — user-provided names
+            // must be a bare filename inside the folder, nothing else.
+            if f.contains('/') || f.contains('\\') || f.contains("..") {
+                return None;
+            }
+            let p = folder.join(&f);
+            if p.exists() { Some(p) } else { None }
+        })
+        .collect();
+    if paths.is_empty() {
+        return Err("no valid files".to_string());
+    }
+    app_state
+        .worker_tx
+        .send(WorkerCmd::UploadFiles(paths))
         .await
         .map_err(|e| e.to_string())
 }

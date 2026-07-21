@@ -40,7 +40,7 @@
   {/if}
 
   <div class="eyebrow footnote">
-    To pull in older files not shown here — Settings › Backfill folder
+    To pick specific older files not shown here — go to Import
   </div>
 </div>
 

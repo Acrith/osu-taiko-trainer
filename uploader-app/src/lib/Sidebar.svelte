@@ -3,6 +3,7 @@
 
   const items = [
     { key: "home",     label: "Home"     },
+    { key: "import",   label: "Import"   },
     { key: "uploads",  label: "Uploads"  },
     { key: "settings", label: "Settings" },
     { key: "about",    label: "About"    },
