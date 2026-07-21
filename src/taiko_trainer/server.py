@@ -1442,6 +1442,13 @@ def create_app(workspace: str) -> FastAPI:
         finally:
             shutil.rmtree(td, ignore_errors=True)
 
+    @app.get("/download")
+    def download_redirect():
+        """Vanity URL for sharing the companion download. Lands on the
+        merged /upload page and scrolls to the companion section — the
+        actual download surface + install instructions."""
+        return RedirectResponse(url="/upload#companion", status_code=302)
+
     @app.get("/upload", response_class=HTMLResponse)
     def upload_page(
         session: str | None = Cookie(default=None, alias=auth_module.SESSION_COOKIE_NAME),
@@ -5037,11 +5044,65 @@ def _render_upload_page(username: str | None) -> str:
     body = f"""
   <section>
     <h1 class="page-title">Upload replays</h1>
-    <p class="hint">Two ways to get your replays into taiko-trainer: drag-drop below for occasional uploads, or install the uploader companion for auto-upload every time you finish a play.</p>
+    <p class="hint">Two ways to get your replays into taiko-trainer. Install the uploader companion for the everyday case, or drag-drop below for one-off imports (e.g. a play from another PC).</p>
   </section>
 
-  <section class="card">
-    <h2>Web upload  <span class="hint" style="font-size: 12px; margin-left: 8px;">occasional / one-off replays</span></h2>
+  <section class="card companion-card" id="companion">
+    <h2>Uploader companion  <span class="hint recommended-tag">recommended · auto-upload every play</span></h2>
+    <p class="companion-lede">
+      A small Windows app that watches your osu! <code>Data/r/</code> folder and
+      posts new <code>.osr</code> files to your account seconds after you finish
+      a play. Your report + rank update without touching a browser.
+    </p>
+
+    <div class="download-row">
+      <a class="download-btn" href="https://github.com/Acrith/osu-taiko-trainer/releases/latest" target="_blank" rel="noopener">
+        <span class="dl-icon">↓</span>
+        <span class="dl-main">
+          <span class="dl-title">Download for Windows</span>
+          <span class="dl-sub">.exe installer · ~2.4 MB · auto-updates</span>
+        </span>
+      </a>
+      <a class="download-alt" href="https://github.com/Acrith/osu-taiko-trainer/releases/latest" target="_blank" rel="noopener">
+        Other formats (portable, MSI) →
+      </a>
+    </div>
+
+    <div class="companion-steps">
+      <div class="companion-step">
+        <span class="companion-step-n">1</span>
+        <div class="companion-step-body">
+          <b>Install and open</b> the app.
+          <div class="companion-step-note">
+            Windows will show <b>"Windows protected your PC"</b> the first time —
+            the binary isn't code-signed yet. Click <b>More info</b> →
+            <b>Run anyway</b> to proceed. Verified safe by anyone who wants to
+            check: source is on GitHub, no telemetry, no third-party libraries
+            beyond what's in the release manifest.
+          </div>
+        </div>
+      </div>
+      <div class="companion-step">
+        <span class="companion-step-n">2</span>
+        <div class="companion-step-body">
+          Go to <b>Settings</b> in the app and paste a token from
+          <a href="/settings/tokens">/settings/tokens</a>.
+          The Replays folder auto-detects on most Windows installs; if not,
+          use <b>Browse…</b>.
+        </div>
+      </div>
+      <div class="companion-step">
+        <span class="companion-step-n">3</span>
+        <div class="companion-step-body">
+          Play. Every finished play uploads within a couple seconds and shows
+          a gain popup with the skill it earned you.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="web-upload">
+    <h2>Web upload  <span class="hint" style="font-size: 12px; margin-left: 8px;">one-off replay from anywhere</span></h2>
     {identity_hint}
     <form id="upload-form" method="post" action="/upload" enctype="multipart/form-data">
       <div id="drop-zone" class="drop-zone">
@@ -5059,25 +5120,6 @@ def _render_upload_page(username: str | None) -> str:
       Progress toast appears in the bottom-right corner after upload starts.
       Works across page navigation. Uploads persist even if you close this tab.
     </p>
-  </section>
-
-  <section class="card">
-    <h2>Uploader companion  <span class="hint" style="font-size: 12px; margin-left: 8px;">auto-upload every play</span></h2>
-    <p>
-      A small local agent that watches your osu! <code>Data/r/</code> folder and posts
-      new <code>.osr</code> files to your account seconds after you finish a play.
-      Your report updates live without touching a browser.
-    </p>
-    <div class="companion-status">
-      <div class="companion-status-label">Status:</div>
-      <div class="companion-status-value">
-        <span class="companion-badge">Coming soon — standalone binary</span>
-        <div class="companion-note hint">
-          Currently only available via the Python source (developer install). Standalone Windows/Mac/Linux binaries are being built. If you're comfortable with Python you can grab it from
-          <a href="https://github.com/Acrith/osu-taiko-trainer" target="_blank" rel="noopener">the repo</a> — clone, <code>uv sync</code>, then <code>uv run taiko-uploader init</code>.
-        </div>
-      </div>
-    </div>
   </section>
 
   <style>
@@ -5103,14 +5145,51 @@ def _render_upload_page(username: str | None) -> str:
       letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer;
     }}
     .upload-btn:disabled {{ background: var(--rule); color: var(--ink-faint); cursor: not-allowed; }}
-    .companion-status {{ margin-top: 14px; padding: 16px; background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; }}
-    .companion-status-label {{ font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px; }}
-    .companion-badge {{
-      display: inline-block; font-family: var(--font-mono); font-size: 11px;
-      padding: 4px 10px; border: 1px dashed rgba(232, 164, 58, 0.6);
-      background: rgba(232, 164, 58, 0.08); color: #e8a43a; border-radius: 3px;
+    /* Companion section — visually primary since most users want this path */
+    .companion-card {{ border-top: 2px solid var(--accent); }}
+    .companion-lede {{ font-size: 15px; color: var(--ink); margin-top: 4px; }}
+    .recommended-tag {{
+      font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--accent); background: var(--accent-faint);
+      padding: 2px 8px; border-radius: 3px; margin-left: 8px; font-weight: 500;
     }}
-    .companion-note {{ margin-top: 10px; font-size: 12px; }}
+    .download-row {{
+      display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+      margin: 20px 0 24px;
+    }}
+    .download-btn {{
+      display: inline-flex; align-items: center; gap: 12px;
+      padding: 14px 22px; background: var(--accent); color: white;
+      border-radius: 5px; text-decoration: none; font-family: var(--font-mono);
+      transition: transform 0.08s ease, background 0.08s ease;
+    }}
+    .download-btn:hover {{
+      background: color-mix(in oklab, black 10%, var(--accent));
+      text-decoration: none; transform: translateY(-1px);
+    }}
+    .dl-icon {{ font-size: 22px; line-height: 1; }}
+    .dl-main {{ display: flex; flex-direction: column; }}
+    .dl-title {{ font-size: 14px; font-weight: 500; letter-spacing: 0.02em; }}
+    .dl-sub {{ font-size: 10px; opacity: 0.8; letter-spacing: 0.08em; margin-top: 2px; }}
+    .download-alt {{
+      font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
+      color: var(--ink-muted); text-decoration: none;
+    }}
+    .download-alt:hover {{ color: var(--accent); text-decoration: underline; }}
+    .companion-steps {{ margin-top: 12px; display: flex; flex-direction: column; gap: 14px; }}
+    .companion-step {{ display: flex; align-items: flex-start; gap: 14px; }}
+    .companion-step-n {{
+      flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border-radius: 50%; background: var(--panel);
+      border: 1px solid var(--rule); font-family: var(--font-mono);
+      font-size: 12px; color: var(--ink-muted); font-weight: 500;
+    }}
+    .companion-step-body {{ flex: 1; font-size: 14px; line-height: 1.55; color: var(--ink); padding-top: 3px; }}
+    .companion-step-note {{
+      margin-top: 6px; padding: 10px 12px; background: var(--panel);
+      border-left: 2px solid var(--accent-soft); border-radius: 3px;
+      font-size: 12px; color: var(--ink-muted); line-height: 1.55;
+    }}
   </style>
   <script>
     const dz = document.getElementById('drop-zone');
