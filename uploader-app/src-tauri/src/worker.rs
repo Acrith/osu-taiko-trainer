@@ -63,18 +63,33 @@ pub struct ActivityRow {
 pub fn spawn(app: AppHandle, state: Arc<State>) -> mpsc::Sender<WorkerCmd> {
     let (tx, rx) = mpsc::channel::<WorkerCmd>(16);
     tauri::async_runtime::spawn(async move {
+        crate::logging::log_line("worker: task started");
+        // Panics inside a spawned task get caught by the panic hook (which
+        // writes to the log) — no wrapper needed here. Log the normal
+        // exit so we can tell "the loop finished cleanly" from "the loop
+        // never even started".
         run(app, state, rx).await;
+        crate::logging::log_line("worker: run() returned");
     });
     tx
 }
 
 async fn run(app: AppHandle, state: Arc<State>, mut cmd_rx: mpsc::Receiver<WorkerCmd>) {
+    crate::logging::log_line("worker::run: entered");
     emit_status(&app, "starting", "Starting…");
 
     loop {
+        crate::logging::log_line("worker::run: loading config");
         let cfg = match crate::config::load() {
-            Ok(Some(c)) => c,
+            Ok(Some(c)) => {
+                crate::logging::log_line(&format!(
+                    "worker::run: config loaded — server={} folder={}",
+                    c.server_url, c.replays_folder
+                ));
+                c
+            }
             Ok(None) => {
+                crate::logging::log_line("worker::run: no config on disk");
                 emit_status(
                     &app,
                     "no_config",
@@ -87,6 +102,7 @@ async fn run(app: AppHandle, state: Arc<State>, mut cmd_rx: mpsc::Receiver<Worke
                 continue;
             }
             Err(e) => {
+                crate::logging::log_line(&format!("worker::run: config load error: {}", e));
                 emit_status(&app, "error", format!("Config error: {}", e));
                 if !wait_for_reload(&mut cmd_rx).await {
                     return;
