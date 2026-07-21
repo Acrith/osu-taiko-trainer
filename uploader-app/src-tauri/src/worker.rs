@@ -54,12 +54,15 @@ pub struct ActivityRow {
     pub at: String,
 }
 
-/// Entry point — spawns the worker task on the tokio runtime the setup
-/// hook already established. Returns the sender the commands module uses
-/// to poke the worker.
+/// Entry point — spawns the worker task on Tauri's shared tokio runtime.
+/// Returns the sender the commands module uses to poke the worker.
+///
+/// `tauri::async_runtime::spawn` wraps `tokio::spawn` but drives it on the
+/// runtime tauri already set up; calling `tokio::spawn` directly from the
+/// synchronous `setup` closure would panic (no current runtime).
 pub fn spawn(app: AppHandle, state: Arc<State>) -> mpsc::Sender<WorkerCmd> {
     let (tx, rx) = mpsc::channel::<WorkerCmd>(16);
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         run(app, state, rx).await;
     });
     tx
