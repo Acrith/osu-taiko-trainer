@@ -17,8 +17,35 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Async runtime — Tauri already re-exports one but we want direct access
+# for fs / task::spawn / channels in the background worker.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
+
+# Cross-platform file-watcher. `notify` is what watchdog uses under the hood.
+notify = "6"
+
+# Local SQLite state DB — mirrors the Python uploader's uploader.state.db.
+# `bundled` compiles SQLite from source so we don't depend on the runner's
+# libsqlite3-dev being present. Adds ~30s to first-cold-build; then cached.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# HTTP client for the server upload. rustls-tls avoids the OpenSSL toolchain
+# on Windows entirely; default-features=false drops native-tls.
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], default-features = false }
+
+# Config file (TOML) + platform user-dirs (%APPDATA%, ~/.config, etc).
+toml = "0.8"
+dirs = "5"
+
+# Fingerprint the first 512 bytes of a replay to dedup collisions.
+sha2 = "0.10"
+
+# Timestamps written to the state DB (uploaded_at column).
+chrono = { version = "0.4", features = ["serde"] }
 
 # Compile-time smaller binaries for release builds.
 [profile.release]

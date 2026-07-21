@@ -1065,7 +1065,13 @@ def create_app(workspace: str) -> FastAPI:
     def api_uploader_whoami(authorization: str | None = Header(default=None)):
         """Return the user info the bearer token belongs to. Used by the
         uploader's main window to show a "logged in as …" card without
-        making the user paste their username separately."""
+        making the user paste their username separately.
+
+        Uses friendly field names (username, user_id, avatar_url) rather
+        than the raw `osu_*`-prefixed DB columns; the uploader treats
+        this as its stable public API and shouldn't have to know about
+        the internal schema. `style` is looked up from the per-player DB
+        so the uploader can echo it back in the identity card."""
         raw_token = auth_module.parse_bearer_header(authorization)
         if not raw_token:
             raise HTTPException(status_code=401, detail="missing or malformed Authorization header")
@@ -1078,13 +1084,28 @@ def create_app(workspace: str) -> FastAPI:
         cat.close()
         if not user:
             raise HTTPException(status_code=404, detail="user record missing")
+        # Resolve style from the per-player DB; missing / "unknown" → None.
+        style: str | None = None
+        try:
+            player_name = user["osu_username"]
+            player_db = workspace / "players" / f"{player_name}.db"
+            if player_db.exists():
+                with sqlite3.connect(str(player_db)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    row = conn.execute(
+                        "SELECT style FROM player_info WHERE name = ?", (player_name,)
+                    ).fetchone()
+                    if row and row["style"] and row["style"] != "unknown":
+                        style = row["style"]
+        except Exception:
+            pass
         return JSONResponse({
-            "osu_user_id": user["osu_user_id"],
-            "osu_username": user["osu_username"],
-            "osu_avatar_url": user["osu_avatar_url"],
-            "osu_cover_url": user["osu_cover_url"],
-            "osu_country_code": user["osu_country_code"],
-            "osu_global_rank": user["osu_global_rank"],
+            "user_id":       user["osu_user_id"],
+            "username":      user["osu_username"],
+            "avatar_url":    user["osu_avatar_url"],
+            "country_code":  user["osu_country_code"],
+            "global_rank":   user["osu_global_rank"],
+            "style":         style,
         })
 
     @app.post("/api/v1/maps")

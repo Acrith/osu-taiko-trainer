@@ -1,4 +1,6 @@
 <script>
+  import { openUrl } from "@tauri-apps/plugin-opener";
+
   const VERSION = "0.2.0";
   const SITE = "https://taiko.umaladder.moe";
   const REPO = "https://github.com/Acrith/osu-taiko-trainer";
@@ -9,9 +11,10 @@
   <h1 class="title">taiko-trainer uploader</h1>
 
   <p class="body">
-    Companion app for <a href={SITE}>taiko.umaladder.moe</a>. It watches your
-    osu! Replays folder and uploads new taiko `.osr` files to the server so
-    your skill dimensions stay up to date.
+    Companion app for
+    <button class="link" onclick={() => openUrl(SITE)}>taiko.umaladder.moe</button>.
+    It watches your osu! replays folder and uploads new taiko `.osr` files to
+    the server so your skill dimensions stay up to date.
   </p>
 
   <div class="grid">
@@ -25,11 +28,15 @@
     </div>
     <div class="cell">
       <div class="cell-k">Site</div>
-      <div class="cell-v mono"><a href={SITE}>taiko.umaladder.moe</a></div>
+      <div class="cell-v mono">
+        <button class="link" onclick={() => openUrl(SITE)}>taiko.umaladder.moe</button>
+      </div>
     </div>
     <div class="cell">
       <div class="cell-k">Source</div>
-      <div class="cell-v mono"><a href={REPO}>github.com/Acrith/osu-taiko-trainer</a></div>
+      <div class="cell-v mono">
+        <button class="link" onclick={() => openUrl(REPO)}>github.com/Acrith/osu-taiko-trainer</button>
+      </div>
     </div>
   </div>
 </div>
@@ -69,4 +76,14 @@
     margin-top: 2px;
     word-break: break-all;
   }
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+  .link:hover { text-decoration: underline; }
 </style>

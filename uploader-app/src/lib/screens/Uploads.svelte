@@ -39,7 +39,9 @@
     </table>
   {/if}
 
-  <div class="eyebrow footnote">Selective upload UI — coming next commit</div>
+  <div class="eyebrow footnote">
+    To pull in older files not shown here — Settings › Backfill folder
+  </div>
 </div>
 
 <style>
